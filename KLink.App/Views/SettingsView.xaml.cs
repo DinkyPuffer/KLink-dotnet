@@ -37,6 +37,18 @@ public partial class SettingsView : UserControl
             if (ThemeDark is not null) ThemeDark.IsChecked = true;
         }
 
+        // 背景
+        if (BgNone is not null && BgImage is not null && BgVideo is not null)
+        {
+            switch (s.BackgroundType)
+            {
+                case "image": BgImage.IsChecked = true; break;
+                case "video": BgVideo.IsChecked = true; break;
+                default: BgNone.IsChecked = true; break;
+            }
+            TxtBgPath.Text = string.IsNullOrEmpty(s.BackgroundPath) ? "" : s.BackgroundPath;
+        }
+
         var root = _settings.ResolveGameRoot();
         TxtDetectedRoot.Text = root is null
             ? "⚠ 未定位到 kds 目录（请手动指定，或将启动器放在 kds 同级/上级目录）"
@@ -50,7 +62,48 @@ public partial class SettingsView : UserControl
         string theme = ThemeLight.IsChecked == true ? "light" : "dark";
         if (System.Windows.Application.Current is App app)
             app.ApplyTheme(theme);
+        // 主题变化后刷新侧栏/标题栏透明度色（背景层色随主题）
+        ApplyBackgroundNow();
         LogService.Instance.Info($"主题已切换：{(theme == "light" ? "Moon Light（浅色）" : "Deep Dark（深色）")}");
+    }
+
+    // ==================== 背景 ====================
+
+    private void Bg_Changed(object sender, RoutedEventArgs e)
+    {
+        if (BgNone is null || BgImage is null || BgVideo is null)
+            return; // InitializeComponent 期间的事件早触发保护
+        var s = _settings.Settings;
+        s.BackgroundType = BgImage.IsChecked == true ? "image"
+            : BgVideo.IsChecked == true ? "video" : "none";
+        ApplyBackgroundNow();
+    }
+
+    private void PickBg_Click(object sender, RoutedEventArgs e)
+    {
+        if (BgNone is null || BgImage is null || BgVideo is null)
+            return;
+        bool video = BgVideo.IsChecked == true;
+        var dialog = new OpenFileDialog
+        {
+            Title = video ? "选择背景视频" : "选择背景图片",
+            Filter = video
+                ? "视频文件 (*.mp4;*.wmv;*.avi;*.mkv)|*.mp4;*.wmv;*.avi;*.mkv|所有文件 (*.*)|*.*"
+                : "图片文件 (*.png;*.jpg;*.jpeg;*.bmp;*.webp)|*.png;*.jpg;*.jpeg;*.bmp;*.webp|所有文件 (*.*)|*.*",
+        };
+        if (dialog.ShowDialog() != true)
+            return;
+        _settings.Settings.BackgroundPath = dialog.FileName;
+        if (BgImage.IsChecked == true || BgVideo.IsChecked == true)
+            _settings.Settings.BackgroundType = BgVideo.IsChecked == true ? "video" : "image";
+        TxtBgPath.Text = dialog.FileName;
+        ApplyBackgroundNow();
+    }
+
+    private void ApplyBackgroundNow()
+    {
+        if (System.Windows.Application.Current.MainWindow is MainWindow window)
+            window.ApplyBackground();
     }
 
     private void SaveSettings_Click(object sender, RoutedEventArgs e)

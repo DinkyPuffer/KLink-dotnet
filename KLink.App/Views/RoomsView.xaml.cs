@@ -18,7 +18,7 @@ public sealed class RoomItem
 
 public partial class RoomsView : UserControl
 {
-    private readonly KLinkService _service = new(SettingsService.Instance);
+    private readonly KLinkService _service = KLinkService.Instance;
     private readonly DispatcherTimer _scanTimer;
 
     public RoomsView()

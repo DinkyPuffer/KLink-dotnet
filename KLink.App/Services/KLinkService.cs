@@ -11,6 +11,9 @@ namespace KLink.App.Services;
 /// </summary>
 public sealed class KLinkService
 {
+    /// <summary>全局单例：所有页面共享同一服务器状态（启动/停止/模式）。</summary>
+    public static KLinkService Instance { get; } = new();
+
     private readonly SettingsService _settings;
     private readonly GameServer _kardsServer = new();
     private ProxyServer? _proxy;
@@ -18,7 +21,7 @@ public sealed class KLinkService
 
     public event Action? StateChanged;
 
-    public KLinkService(SettingsService settings) => _settings = settings;
+    private KLinkService() => _settings = SettingsService.Instance;
 
     /// <summary>当前模式：local / lan / remote / none。</summary>
     public string CurrentMode { get; private set; } = "none";

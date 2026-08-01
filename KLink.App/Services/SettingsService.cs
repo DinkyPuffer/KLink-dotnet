@@ -24,6 +24,12 @@ public sealed class AppSettings
     /// <summary>界面主题：dark（Deep Dark 深色）/ light（Moon Light 浅色）。</summary>
     public string Theme { get; set; } = "dark";
 
+    /// <summary>自定义背景：none / image / video。</summary>
+    public string BackgroundType { get; set; } = "none";
+
+    /// <summary>背景图片/视频文件路径。</summary>
+    public string? BackgroundPath { get; set; }
+
     [JsonIgnore]
     public bool HasCustomGameRoot => !string.IsNullOrWhiteSpace(GameRoot);
 }

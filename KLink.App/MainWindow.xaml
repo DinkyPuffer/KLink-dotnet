@@ -7,7 +7,7 @@
              xmlns:glow="clr-namespace:KLink.App.Infrastructure"
         xmlns:animations="clr-namespace:KLink.App.Infrastructure"
         mc:Ignorable="d"
-        Title="KLink — 游戏启动器"
+        Title="KLink-dotnet"
         Width="1160" Height="760"
         MinWidth="960" MinHeight="640"
         WindowStartupLocation="CenterScreen"
@@ -71,9 +71,16 @@
         </Style>
     </ui:FluentWindow.Resources>
 
-    <!-- 根布局：内容 + 四条感应光边（鼠标靠近哪条边，哪条边发光） -->
+    <!-- 根布局：自定义背景层 + 内容 + 四条感应光边 -->
     <Grid>
-        <Border Background="{DynamicResource Brush.BgDeep}">
+        <!-- 自定义背景（图片/视频，设置页可配置；内容层透明以透出背景） -->
+        <Grid x:Name="BackgroundHost" IsHitTestVisible="False">
+            <Image x:Name="BgImage" Stretch="UniformToFill" Visibility="Collapsed" />
+            <MediaElement x:Name="BgVideo" Stretch="UniformToFill" LoadedBehavior="Manual"
+                          UnloadedBehavior="Stop" Volume="0" Visibility="Collapsed"
+                          MediaEnded="BgVideo_MediaEnded" />
+        </Grid>
+        <Border Background="Transparent">
             <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="34" />
@@ -100,7 +107,7 @@
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center">
                     <Ellipse Width="10" Height="10" Fill="{DynamicResource Brush.Emerald}" VerticalAlignment="Center" />
-                    <TextBlock Text="KLink — 游戏启动器" FontSize="12" Margin="8,0,0,0"
+                    <TextBlock Text="KLink-dotnet" FontSize="12" Margin="8,0,0,0"
                                Foreground="{DynamicResource Brush.TextSecondary}" VerticalAlignment="Center" />
                 </StackPanel>
             </DockPanel>
@@ -129,16 +136,16 @@
             </Grid.ColumnDefinitions>
 
         <!-- ============ 侧边栏（模仿 Java 版） ============ -->
-        <Border Grid.Column="0" Background="{DynamicResource Brush.BgBase}"
+        <Border x:Name="SidebarBorder" Grid.Column="0" Background="{DynamicResource Brush.BgBase}"
                 BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
             <DockPanel>
-                <!-- Logo（透明底，融入侧栏） -->
-                <Border DockPanel.Dock="Top" Height="86" Background="Transparent">
+                <!-- Logo（透明底；放大 + 版本号） -->
+                <Border DockPanel.Dock="Top" Height="100" Background="Transparent">
                     <StackPanel VerticalAlignment="Center" Margin="20,0">
-                        <TextBlock Text="KLINK" FontSize="24" FontWeight="Bold"
+                        <TextBlock Text="KLINK" FontSize="30" FontWeight="Bold"
                                    Foreground="{DynamicResource Brush.EmeraldStrong}" />
-                        <TextBlock Text="游戏启动器" FontSize="11" Margin="0,2,0,0"
-                                   Foreground="{DynamicResource Brush.EmeraldMuted}" />
+                        <TextBlock x:Name="VersionText" FontSize="10" Margin="0,4,0,0"
+                                   Foreground="{DynamicResource Brush.TextTertiary}" />
                     </StackPanel>
                 </Border>
 

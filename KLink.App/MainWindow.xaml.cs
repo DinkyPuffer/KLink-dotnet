@@ -15,7 +15,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
     private readonly RoomsView _roomsView = new();
     private readonly SettingsView _settingsView = new();
     private readonly GameProcessService _game = new(SettingsService.Instance);
-    private readonly KLinkService _service = new(SettingsService.Instance);
+    private readonly KLinkService _service = KLinkService.Instance;
     private readonly System.Windows.Threading.DispatcherTimer _statusTimer;
 
     public MainWindow()
@@ -39,6 +39,13 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
 
         _game.Exited += () => Dispatcher.BeginInvoke(RefreshSidebarStatus);
         _service.StateChanged += () => Dispatcher.BeginInvoke(RefreshSidebarStatus);
+
+        // Logo 版本号
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        VersionText.Text = version is null ? "" : $"v{version.Major}.{version.Minor}.{version.Build}";
+
+        // 应用自定义背景
+        ApplyBackground();
 
         StateChanged += (_, _) =>
         {
@@ -342,6 +349,105 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         }
     }
 
+    // ==================== 自定义背景 ====================
+
+    /// <summary>按设置应用背景（图片/视频/无），设置页改动后调用。</summary>
+    public void ApplyBackground()
+    {
+        var s = SettingsService.Instance.Settings;
+        var path = s.BackgroundPath;
+        bool hasFile = !string.IsNullOrWhiteSpace(path) && File.Exists(path);
+
+        BgVideo.Stop();
+        BgImage.Source = null;
+
+        switch (s.BackgroundType)
+        {
+            case "image" when hasFile:
+                try
+                {
+                    BgImage.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(path!));
+                    BgImage.Visibility = Visibility.Visible;
+                    BgVideo.Visibility = Visibility.Collapsed;
+                }
+                catch { ClearBackground(); }
+                break;
+            case "video" when hasFile:
+                try
+                {
+                    BgVideo.Source = new Uri(path!);
+                    BgVideo.Visibility = Visibility.Visible;
+                    BgImage.Visibility = Visibility.Collapsed;
+                    BgVideo.Play();
+                }
+                catch { ClearBackground(); }
+                break;
+            default:
+                ClearBackground();
+                break;
+        }
+
+        // 有背景时侧栏/标题栏半透明（透出背景），无背景时恢复不透明
+        SetTranslucency(s.BackgroundType is "image" or "video" && hasFile);
+    }
+
+    /// <summary>
+    /// 半透明切换：修改主题合并字典中的 brush（主题切换时字典整体替换，不会残留旧色），
+    /// 覆盖侧栏/标题栏/卡片/输入框等整个 UI。
+    /// </summary>
+    private void SetTranslucency(bool translucent)
+    {
+        byte alpha = translucent ? (byte)190 : (byte)255;
+        var keys = new[]
+        {
+            "Brush.BgBase", "Brush.BgElevated", "Brush.BgSurface", "Brush.BgOverlay",
+            "CardBackgroundFillColorDefaultBrush", "CardBackgroundFillColorSecondaryBrush",
+            "ControlFillColorDefaultBrush", "ControlFillColorSecondaryBrush",
+            "LayerFillColorDefaultBrush",
+        };
+
+        // 清理之前可能残留的本地覆盖项（避免挡住主题字典的颜色）
+        foreach (var key in keys)
+            Application.Current.Resources.Remove(key);
+
+        // 修改当前主题合并字典中的 brush
+        foreach (var key in keys)
+        {
+            try
+            {
+                foreach (var dict in Application.Current.Resources.MergedDictionaries)
+                {
+                    if (dict.Contains(key) && dict[key] is SolidColorBrush b)
+                    {
+                        dict[key] = new SolidColorBrush(
+                            Color.FromArgb(alpha, b.Color.R, b.Color.G, b.Color.B));
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // 个别字典（如 WPF UI 内部）可能不允许写入，忽略
+            }
+        }
+    }
+
+    private void ClearBackground()
+    {
+        BgImage.Source = null;
+        BgImage.Visibility = Visibility.Collapsed;
+        BgVideo.Stop();
+        BgVideo.Source = null;
+        BgVideo.Visibility = Visibility.Collapsed;
+    }
+
+    private void BgVideo_MediaEnded(object sender, RoutedEventArgs e)
+    {
+        // 循环播放背景视频
+        BgVideo.Position = TimeSpan.Zero;
+        BgVideo.Play();
+    }
+
     // ==================== 侧栏状态 ====================
 
     private void RefreshSidebarStatus()
@@ -355,24 +461,32 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
                 : (SolidColorBrush)FindResource("Brush.TextTertiary");
         StatusText.Text = running ? "服务器运行中" : gameRunning ? "游戏运行中" : "未运行";
         LaunchGameText.Text = gameRunning ? "游戏运行中…" : "启动游戏";
-        BtnLaunchGame.IsEnabled = !gameRunning;
+        // 服务器未运行或游戏已运行时按钮不可点
+        BtnLaunchGame.IsEnabled = running && !gameRunning;
+        BtnLaunchGame.Opacity = running && !gameRunning ? 1.0 : 0.45;
     }
 
     private void LaunchGame_Click(object sender, RoutedEventArgs e)
     {
+        // 未启动服务器时禁止进游戏（本地/局域网需要服务器；远程模式启动代理后 ServerRunning 为 true）
+        if (!_service.ServerRunning)
+        {
+            new Wpf.Ui.Controls.MessageBox
+            {
+                Title = "KLink-dotnet",
+                Content = "请先启动服务器，再进入游戏。",
+            }.ShowDialog();
+            return;
+        }
         string? error = _game.Start();
         if (error is not null)
         {
             new Wpf.Ui.Controls.MessageBox
             {
-                Title = "启动游戏",
+                Title = "KLink-dotnet",
                 Content = error,
             }.ShowDialog();
             return;
-        }
-        if (!_service.ServerRunning && _service.CurrentMode != "remote")
-        {
-            LogService.Instance.Warn("提示：本地/局域网模式下请先启动服务器再进入游戏");
         }
         RefreshSidebarStatus();
     }
@@ -418,7 +532,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             new Wpf.Ui.Controls.MessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = "未检测到 .pak 文件（支持拖入模组包自动安装）",
             }.ShowDialog();
             return;
@@ -429,7 +543,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             new Wpf.Ui.Controls.MessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = "未定位游戏目录，请先在设置页指定后重试",
             }.ShowDialog();
             SelectNavItem("settings");
@@ -455,7 +569,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
             {
                 new Wpf.Ui.Controls.MessageBox
                 {
-                    Title = "KLink",
+                    Title = "KLink-dotnet",
                     Content = $"安装失败：{fileName}",
                 }.ShowDialog();
             }
@@ -473,7 +587,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow
         {
             new Wpf.Ui.Controls.MessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = message,
             }.ShowDialog();
         }

@@ -9,7 +9,7 @@ namespace KLink.App.Views;
 
 public partial class ServerView : UserControl
 {
-    private readonly KLinkService _service = new(SettingsService.Instance);
+    private readonly KLinkService _service = KLinkService.Instance;
     private readonly DispatcherTimer _statusTimer;
 
     public ServerView()
@@ -124,6 +124,10 @@ public partial class ServerView : UserControl
             StartBreathing();
             BtnStartServer.IsEnabled = false;
             BtnStopServer.IsEnabled = true;
+            // 运行中锁定模式选择，防止切换模式导致状态不一致
+            ModeLocal.IsEnabled = false;
+            ModeLan.IsEnabled = false;
+            ModeRemote.IsEnabled = false;
             int online = status["online_players"]?.GetValue<int>() ?? 0;
             int matches = status["matches"]?.GetValue<int>() ?? 0;
             HeroPlayers.Text = $"{online} 在线 / {matches} 对局";
@@ -140,6 +144,9 @@ public partial class ServerView : UserControl
             StopBreathing();
             BtnStartServer.IsEnabled = true;
             BtnStopServer.IsEnabled = false;
+            ModeLocal.IsEnabled = true;
+            ModeLan.IsEnabled = true;
+            ModeRemote.IsEnabled = true;
             HeroPlayers.Text = "0";
             HeroPort.Text = "5231";
         }
@@ -190,7 +197,7 @@ public partial class ServerView : UserControl
             LogService.Instance.Info($"日志已导出：{dialog.FileName}");
             var result = new Wpf.Ui.Controls.MessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = $"日志已导出到：\n{dialog.FileName}\n\n是否打开所在文件夹？",
             };
             if (result.ShowDialog() == true)

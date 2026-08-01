@@ -42,7 +42,7 @@ public partial class ModsView : UserControl
         {
             new WpfUiMessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = "请先在设置页配置游戏目录",
             }.ShowDialog();
             return;
@@ -70,7 +70,7 @@ public partial class ModsView : UserControl
             {
                 new WpfUiMessageBox
                 {
-                    Title = "KLink",
+                    Title = "KLink-dotnet",
                     Content = $"安装失败：{fileName}",
                 }.ShowDialog();
             }
@@ -82,7 +82,7 @@ public partial class ModsView : UserControl
                 message += $"\n\n其中有 {renamed} 个已自动补 _P 后缀（PC 端引擎只加载 _P 结尾的 pak）。";
             new WpfUiMessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = message,
             }.ShowDialog();
         }
@@ -104,7 +104,7 @@ public partial class ModsView : UserControl
         {
             var confirm = new WpfUiMessageBox
             {
-                Title = "KLink",
+                Title = "KLink-dotnet",
                 Content = $"确定卸载模组「{entry.Name}」？",
                 PrimaryButtonText = "卸载",
                 SecondaryButtonText = "取消",
