@@ -2,7 +2,7 @@
 
 将游戏服务器内嵌到启动器，一个程序即可**本地开服 / 局域网联机 / 连接远程服**。
 
-本仓库为 **.NET (WPF) 重写版**：界面与交互仿照 [KLink Android 版（Java）](../KLink/source) 的前端设计（深色/浅色双主题、侧边导航、控制台），服务器核心逻辑移植自 [Go 服务端](../KLink/kards-backend-go)，并与 Java 版 `kardsserver` 保持协议一致。
+本仓库为 **.NET (WPF) 重写版**：界面与交互仿照 [KLink Android 版（Java）](https://github.com/Xuewu-awa/KLink) 的前端设计（深色/浅色双主题、侧边导航、控制台），服务器核心逻辑移植自 [Go 服务端](https://github.com/kardswalker/kards-server-go)，并与 Java 版 `kardsserver` 保持协议一致。
 
 ---
 
