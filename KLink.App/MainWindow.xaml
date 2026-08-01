@@ -1,0 +1,245 @@
+<ui:FluentWindow x:Class="KLink.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:glow="clr-namespace:KLink.App.Infrastructure"
+        xmlns:animations="clr-namespace:KLink.App.Infrastructure"
+        mc:Ignorable="d"
+        Title="KLink — 游戏启动器"
+        Width="1160" Height="760"
+        MinWidth="960" MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        WindowCornerPreference="DoNotRound"
+        WindowBackdropType="Mica"
+        ExtendsContentIntoTitleBar="True"
+        Background="{DynamicResource Brush.BgDeep}"
+        AllowDrop="True"
+        DragOver="Window_DragOver" Drop="Window_Drop" DragLeave="Window_DragLeave">
+    <ui:FluentWindow.Resources>
+        <!-- 侧栏导航项 -->
+        <Style x:Key="NavItem" TargetType="RadioButton">
+            <Setter Property="Height" Value="46" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Grid>
+                            <Border x:Name="Indicator" Width="3" HorizontalAlignment="Left"
+                                    Background="{DynamicResource Brush.Emerald}" CornerRadius="0,3,3,0"
+                                    Visibility="Collapsed" />
+                            <Border x:Name="Bd" Background="Transparent" CornerRadius="8" Margin="8,2" Padding="14,0">
+                                <ContentPresenter VerticalAlignment="Center" />
+                            </Border>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.HoverTint}" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.SelectionTint}" />
+                                <Setter TargetName="Indicator" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <!-- 标题栏窗口按钮（自绘：透明底 + 半透明 hover） -->
+        <Style x:Key="CaptionButton" TargetType="Button">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="Height" Value="34" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.HoverTint}" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#26FFFFFF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </ui:FluentWindow.Resources>
+
+    <!-- 根布局：内容 + 四条感应光边（鼠标靠近哪条边，哪条边发光） -->
+    <Grid>
+        <Border Background="{DynamicResource Brush.BgDeep}">
+            <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="34" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+        <!-- ============ 标题栏（自绘：系统 HTCAPTION 拖动，最大化时边框区由 ResizeMode 切换禁用） ============ -->
+        <Border x:Name="CaptionBar" Grid.Row="0" Background="{DynamicResource Brush.BgBase}"
+                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"
+                MouseLeftButtonDown="Caption_MouseDown"
+                MouseMove="Caption_MouseMove" MouseLeftButtonUp="Caption_MouseUp">
+            <DockPanel LastChildFill="False">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button x:Name="BtnMinimize" Style="{DynamicResource CaptionButton}" Click="Minimize_Click" ToolTip="最小化">
+                        <ui:SymbolIcon Symbol="Subtract24" FontSize="14" Foreground="{DynamicResource Brush.TextSecondary}" />
+                    </Button>
+                    <Button x:Name="BtnMaximize" Style="{DynamicResource CaptionButton}" Click="Maximize_Click" ToolTip="最大化">
+                        <ui:SymbolIcon x:Name="MaximizeIcon" Symbol="Square24" FontSize="13"
+                                       Foreground="{DynamicResource Brush.TextSecondary}" />
+                    </Button>
+                    <Button Style="{DynamicResource CaptionButton}" Click="Close_Click" ToolTip="关闭">
+                        <ui:SymbolIcon Symbol="Dismiss24" FontSize="13" Foreground="{DynamicResource Brush.Danger}" />
+                    </Button>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center">
+                    <Ellipse Width="10" Height="10" Fill="{DynamicResource Brush.Emerald}" VerticalAlignment="Center" />
+                    <TextBlock Text="KLink — 游戏启动器" FontSize="12" Margin="8,0,0,0"
+                               Foreground="{DynamicResource Brush.TextSecondary}" VerticalAlignment="Center" />
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- 拖拽模组提示层（拖入 pak 时显示，覆盖全窗口） -->
+        <Border x:Name="DropOverlay" Grid.Row="0" Grid.RowSpan="2" Visibility="Collapsed"
+                Background="#CC050508" BorderBrush="{DynamicResource Brush.Emerald}" BorderThickness="3"
+                IsHitTestVisible="False" Panel.ZIndex="99">
+            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="14" Padding="44,26"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    BorderBrush="{DynamicResource Brush.Emerald}" BorderThickness="1">
+                <StackPanel>
+                    <TextBlock Text="松开以安装模组" FontSize="24" FontWeight="SemiBold"
+                               Foreground="{DynamicResource Brush.EmeraldStrong}" HorizontalAlignment="Center" />
+                    <TextBlock x:Name="DropOverlayHint" Style="{DynamicResource HintText}" Margin="0,10,0,0"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="212" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+        <!-- ============ 侧边栏（模仿 Java 版） ============ -->
+        <Border Grid.Column="0" Background="{DynamicResource Brush.BgBase}"
+                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+            <DockPanel>
+                <!-- Logo（透明底，融入侧栏） -->
+                <Border DockPanel.Dock="Top" Height="86" Background="Transparent">
+                    <StackPanel VerticalAlignment="Center" Margin="20,0">
+                        <TextBlock Text="KLINK" FontSize="24" FontWeight="Bold"
+                                   Foreground="{DynamicResource Brush.EmeraldStrong}" />
+                        <TextBlock Text="游戏启动器" FontSize="11" Margin="0,2,0,0"
+                                   Foreground="{DynamicResource Brush.EmeraldMuted}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- 导航列表 -->
+                <StackPanel DockPanel.Dock="Top" Margin="8,14,8,0">
+                    <RadioButton x:Name="NavServer" Style="{DynamicResource NavItem}" GroupName="Nav"
+                                 Tag="server" IsChecked="True" Checked="Nav_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Server24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
+                            <TextBlock Text="服务器" FontSize="14" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="NavRooms" Style="{DynamicResource NavItem}" GroupName="Nav"
+                                 Tag="rooms" Checked="Nav_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Search24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
+                            <TextBlock Text="房间发现" FontSize="14" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="NavMods" Style="{DynamicResource NavItem}" GroupName="Nav"
+                                 Tag="mods" Checked="Nav_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Box24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
+                            <TextBlock Text="模组管理" FontSize="14" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="NavSettings" Style="{DynamicResource NavItem}" GroupName="Nav"
+                                 Tag="settings" Checked="Nav_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Settings24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
+                            <TextBlock Text="设置" FontSize="14" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </StackPanel>
+                    </RadioButton>
+                </StackPanel>
+
+                <!-- 底部：启动游戏 + 状态 -->
+                <StackPanel DockPanel.Dock="Bottom" Margin="16,0,16,18">
+                    <ui:Button x:Name="BtnLaunchGame" glow:GlowSpotlight.Enabled="True" Style="{DynamicResource PrimaryActionButton}"
+                               animations:ButtonAnimations.Enabled="True" Click="LaunchGame_Click">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <ui:SymbolIcon Symbol="Play24" FontSize="16" />
+                            <TextBlock x:Name="LaunchGameText" Text="启动游戏" Margin="8,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                    </ui:Button>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                        <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource Brush.TextTertiary}"
+                                 Margin="0,0,8,0" VerticalAlignment="Center" />
+                        <TextBlock x:Name="StatusText" FontSize="12"
+                                   Foreground="{DynamicResource Brush.TextSecondary}" Text="未运行" />
+                    </StackPanel>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+            <!-- ============ 内容区 ============ -->
+            <Frame x:Name="NavFrame" Grid.Column="1" NavigationUIVisibility="Hidden" />
+            </Grid>
+            </Grid>
+        </Border>
+
+        <!-- 四条感应光边：以鼠标为圆心，半径内的边缘段发光（光斑跟随鼠标投影位置） -->
+        <Border x:Name="GlowTop" Height="3" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0">
+            <Border.Background>
+                <RadialGradientBrush MappingMode="Absolute" Center="0,3" GradientOrigin="0,3" RadiusX="120" RadiusY="120">
+                    <GradientStop Color="{DynamicResource Color.EmeraldStrong}" Offset="0" />
+                    <GradientStop Color="{DynamicResource Color.Emerald}" Offset="0.55" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </RadialGradientBrush>
+            </Border.Background>
+        </Border>
+        <Border x:Name="GlowBottom" Height="3" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0">
+            <Border.Background>
+                <RadialGradientBrush MappingMode="Absolute" Center="0,3" GradientOrigin="0,3" RadiusX="120" RadiusY="120">
+                    <GradientStop Color="{DynamicResource Color.EmeraldStrong}" Offset="0" />
+                    <GradientStop Color="{DynamicResource Color.Emerald}" Offset="0.55" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </RadialGradientBrush>
+            </Border.Background>
+        </Border>
+        <Border x:Name="GlowLeft" Width="3" HorizontalAlignment="Left" IsHitTestVisible="False" Opacity="0">
+            <Border.Background>
+                <RadialGradientBrush MappingMode="Absolute" Center="3,0" GradientOrigin="3,0" RadiusX="120" RadiusY="120">
+                    <GradientStop Color="{DynamicResource Color.EmeraldStrong}" Offset="0" />
+                    <GradientStop Color="{DynamicResource Color.Emerald}" Offset="0.55" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </RadialGradientBrush>
+            </Border.Background>
+        </Border>
+        <Border x:Name="GlowRight" Width="3" HorizontalAlignment="Right" IsHitTestVisible="False" Opacity="0">
+            <Border.Background>
+                <RadialGradientBrush MappingMode="Absolute" Center="3,0" GradientOrigin="3,0" RadiusX="120" RadiusY="120">
+                    <GradientStop Color="{DynamicResource Color.EmeraldStrong}" Offset="0" />
+                    <GradientStop Color="{DynamicResource Color.Emerald}" Offset="0.55" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </RadialGradientBrush>
+            </Border.Background>
+        </Border>
+    </Grid>
+</ui:FluentWindow>

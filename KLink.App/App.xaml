@@ -1,0 +1,91 @@
+<Application x:Class="KLink.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ui:ThemesDictionary Theme="Dark" />
+                <ui:ControlsDictionary />
+                <!-- 主题覆盖（深色默认；浅色为 Java 版 Moon Light 预设） -->
+                <ResourceDictionary Source="Resources/ThemeDark.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- ============ 镂空按钮模板（透明底 + 描边 + 鼠标光圈层，由 GlowSpotlight 驱动） ============ -->
+            <Style x:Key="HollowButtonBase" TargetType="ui:Button">
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+                <Setter Property="Padding" Value="20,11" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ui:Button">
+                            <Border x:Name="Bd" Padding="{TemplateBinding Padding}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    Background="{TemplateBinding Background}">
+                                <Grid>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                        <ContentPresenter Content="{TemplateBinding Icon}" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                        <ContentPresenter />
+                                    </StackPanel>
+                                    <!-- 鼠标光圈层（初始透明，GlowSpotlight 控制圆心与显隐；Margin 让光晕溢出到边框外形成辉光） -->
+                                    <Border x:Name="Glow"  IsHitTestVisible="False" Opacity="0" />
+                                </Grid>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="Bd" Property="Opacity" Value="0.75" />
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Trigger.EnterActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation Storyboard.TargetName="Bd" Storyboard.TargetProperty="Opacity" To="0.4" Duration="0:0:0.25" />
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </Trigger.EnterActions>
+                                    <Trigger.ExitActions>
+                                        <BeginStoryboard>
+                                            <Storyboard>
+                                                <DoubleAnimation Storyboard.TargetName="Bd" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.25" />
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </Trigger.ExitActions>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- ============ 主操作按钮：镂空（翡翠描边） ============ -->
+            <Style x:Key="PrimaryActionButton" TargetType="ui:Button" BasedOn="{StaticResource HollowButtonBase}">
+                <Setter Property="Tag" Value="primary" />
+                <Setter Property="Foreground" Value="{DynamicResource Brush.EmeraldStrong}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource Brush.Emerald}" />
+                <Setter Property="BorderThickness" Value="1" />
+                </Style>
+
+            <!-- ============ 危险操作按钮：镂空（红描边） ============ -->
+            <Style x:Key="DangerOutlineButton" TargetType="ui:Button" BasedOn="{StaticResource HollowButtonBase}">
+                <Setter Property="Tag" Value="danger" />
+                <Setter Property="Foreground" Value="{DynamicResource Brush.Danger}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource Brush.Danger}" />
+                <Setter Property="BorderThickness" Value="1" />
+                </Style>
+
+            <!-- ============ 次级操作按钮：镂空（灰描边） ============ -->
+            <Style x:Key="SecondaryActionButton" TargetType="ui:Button" BasedOn="{StaticResource HollowButtonBase}">
+                <Setter Property="Tag" Value="secondary" />
+                <Setter Property="Foreground" Value="{DynamicResource Brush.TextPrimary}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource ControlStrokeColorDefaultBrush}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="Padding" Value="16,8" />
+                <Setter Property="FontSize" Value="13" />
+                </Style>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

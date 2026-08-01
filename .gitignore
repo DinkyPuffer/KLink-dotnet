@@ -1,0 +1,17 @@
+# 构建产物
+bin/
+obj/
+*.user
+
+# IDE
+.vs/
+.idea/
+
+# 运行时数据
+*.db
+*.db-journal
+data/
+
+# 本地配置
+config.json
+crash.log

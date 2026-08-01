@@ -1,0 +1,101 @@
+<UserControl x:Class="KLink.App.Views.RoomsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:glow="clr-namespace:KLink.App.Infrastructure"
+             xmlns:animations="clr-namespace:KLink.App.Infrastructure"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignHeight="680" d:DesignWidth="1100">
+    <Grid Margin="28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="14" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Style="{DynamicResource PageTitle}" Text="房间发现" />
+
+
+        </StackPanel>
+
+        <Border Grid.Row="2" Background="{DynamicResource Brush.BgElevated}" CornerRadius="14" Padding="18,14"
+                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <DockPanel Grid.Row="0" Margin="2,0,0,10">
+                    <TextBlock Style="{DynamicResource CardTitle}" Text="发现的房间" VerticalAlignment="Center" />
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <ui:Button x:Name="BtnStopScan" glow:GlowSpotlight.Enabled="True" animations:ButtonAnimations.Enabled="True" Content="停止扫描" Style="{DynamicResource SecondaryActionButton}"
+                                   Padding="12,5" IsEnabled="False" Click="StopScan_Click" />
+                        <ui:Button x:Name="BtnScanRooms" glow:GlowSpotlight.Enabled="True" animations:ButtonAnimations.Enabled="True" Content="扫描局域网房间" Style="{DynamicResource SecondaryActionButton}"
+                                   Icon="Search24" Padding="12,5" Margin="8,0,0,0" Click="StartScan_Click" />
+                    </StackPanel>
+                    <TextBlock x:Name="TxtScanState" Style="{DynamicResource HintText}" VerticalAlignment="Center"
+                               Margin="12,0,0,0" />
+                </DockPanel>
+
+                <ui:ListView x:Name="RoomList" Grid.Row="1" Background="Transparent" BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ui:ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="房间名" Width="220">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding RoomName}" Foreground="{DynamicResource Brush.TextPrimary}"
+                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="主机" Width="130">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding HostName}" Foreground="{DynamicResource Brush.TextSecondary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="地址" Width="140">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Address}" Foreground="{DynamicResource Brush.TextSecondary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="端口" Width="70">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Port}" Foreground="{DynamicResource Brush.TextTertiary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="玩家" Width="70">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Players}" Foreground="{DynamicResource Brush.TextTertiary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="" Width="110">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <ui:Button Content="加入" Appearance="Primary" Padding="16,5"
+                                                   Tag="{Binding}" Click="JoinRoom_Click" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                        </GridView>
+                    </ui:ListView.View>
+                </ui:ListView>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

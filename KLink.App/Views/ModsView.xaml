@@ -1,0 +1,101 @@
+<UserControl x:Class="KLink.App.Views.ModsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+             xmlns:glow="clr-namespace:KLink.App.Infrastructure"
+             xmlns:animations="clr-namespace:KLink.App.Infrastructure"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignHeight="680" d:DesignWidth="1100">
+    <Grid Margin="28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="14" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Style="{DynamicResource PageTitle}" Text="模组管理" />
+
+
+        </StackPanel>
+
+        <Border Grid.Row="2" Background="{DynamicResource Brush.BgElevated}" CornerRadius="14" Padding="18,14"
+                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <DockPanel Grid.Row="0" Margin="2,0,0,10">
+                    <TextBlock Style="{DynamicResource CardTitle}" Text="已安装模组" VerticalAlignment="Center" />
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <ui:Button Content="安装模组" glow:GlowSpotlight.Enabled="True" animations:ButtonAnimations.Enabled="True" Style="{DynamicResource SecondaryActionButton}" Icon="Open24"
+                                   Padding="12,5" Click="InstallMod_Click" />
+                        <ui:Button Content="刷新" glow:GlowSpotlight.Enabled="True" animations:ButtonAnimations.Enabled="True" Style="{DynamicResource SecondaryActionButton}" Icon="ArrowClockwise24"
+                                   Padding="12,5" Margin="8,0,0,0" Click="RefreshMods_Click" />
+                    </StackPanel>
+                    <TextBlock x:Name="TxtModsPath" Style="{DynamicResource HintText}" VerticalAlignment="Center"
+                               Margin="12,0,0,0" />
+                </DockPanel>
+
+                <ui:ListView x:Name="ModList" Grid.Row="1" Background="Transparent" BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ui:ListView.View>
+                        <GridView>
+                            <GridViewColumn Header="名称" Width="300">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Name}" Foreground="{DynamicResource Brush.TextPrimary}"
+                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="大小" Width="80">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Size}" Foreground="{DynamicResource Brush.TextTertiary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="优先级" Width="70">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Priority}" Foreground="{DynamicResource Brush.TextTertiary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="状态" Width="76">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Status}" Foreground="{DynamicResource Brush.TextSecondary}"
+                                                   VerticalAlignment="Center" />
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                            <GridViewColumn Header="操作" Width="220">
+                                <GridViewColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Orientation="Horizontal">
+                                            <ui:Button Content="启用" Appearance="Success" Padding="12,4" FontSize="12"
+                                                       Tag="{Binding}" Click="ToggleMod_Click"
+                                                       Visibility="{Binding EnableVisible}" />
+                                            <ui:Button Content="禁用" Appearance="Secondary" Padding="12,4" FontSize="12"
+                                                       Tag="{Binding}" Click="ToggleMod_Click" Margin="6,0,0,0"
+                                                       Visibility="{Binding DisableVisible}" />
+                                            <ui:Button Content="卸载" Appearance="Danger" Padding="12,4" FontSize="12"
+                                                       Tag="{Binding}" Click="UninstallMod_Click" Margin="6,0,0,0" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </GridViewColumn.CellTemplate>
+                            </GridViewColumn>
+                        </GridView>
+                    </ui:ListView.View>
+                </ui:ListView>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>
