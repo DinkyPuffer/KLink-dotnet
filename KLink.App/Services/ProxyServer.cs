@@ -5,44 +5,69 @@ namespace KLink.App.Services;
 
 /// <summary>
 /// TCP 透明代理（ProxyServer）。
-/// 监听 127.0.0.1:5231，将 HTTP/WebSocket 流量双向转发到远程服务器（纯字节隧道，不解析协议）。
+/// 监听 127.0.0.1:5231（HTTP）与 127.0.0.1:5232（WebSocket），
+/// 分别双向转发到远程服务器 remoteHost:remoteHttpPort / remoteHttpPort+1（纯字节隧道，不解析协议）。
+/// 游戏客户端固定连本地 5231/5232，与本地/局域网模式端口一致。
 /// </summary>
 public sealed class ProxyServer
 {
     private readonly string _remoteHost;
-    private readonly int _remotePort;
-    private readonly int _listenPort;
+    private readonly int _remoteHttpPort;
+    private readonly int _remoteWsPort;
+    private readonly int _listenHttpPort;
+    private readonly int _listenWsPort;
+    private readonly bool _enableWs;
 
     private volatile bool _running;
     private TcpListener? _listener;
+    private TcpListener? _wsListener;
     private CancellationTokenSource? _cts;
-    private Task? _acceptTask;
+    private readonly List<Task> _tasks = new();
     private readonly List<TcpClient> _clients = new();
     private readonly object _lock = new();
 
-    public ProxyServer(string remoteHost, int remotePort, int listenPort = 5231)
+    /// <param name="remoteHost">远程服务器地址。</param>
+    /// <param name="remoteHttpPort">远程 HTTP 端口；WebSocket 端口约定为 +1。</param>
+    /// <param name="listenPort">本地 HTTP 监听端口（默认 5231），WS 监听端口为 +1。</param>
+    /// <param name="enableWs">是否同时代理 WebSocket 端口（默认 true，游戏对战必需）。</param>
+    public ProxyServer(string remoteHost, int remoteHttpPort, int listenPort = 5231, bool enableWs = true)
     {
         _remoteHost = remoteHost;
-        _remotePort = remotePort;
-        _listenPort = listenPort;
+        _remoteHttpPort = remoteHttpPort;
+        _remoteWsPort = remoteHttpPort + 1;
+        _listenHttpPort = listenPort;
+        _listenWsPort = listenPort + 1;
+        _enableWs = enableWs;
     }
 
     public bool IsRunning => _running;
 
     public string RemoteHost => _remoteHost;
-    public int RemotePort => _remotePort;
+    public int RemoteHttpPort => _remoteHttpPort;
 
-    /// <summary>启动代理（异步 accept 循环）。</summary>
+    /// <summary>启动代理（异步 accept 循环，HTTP + WS 双端口）。</summary>
     public void Start()
     {
         if (_running)
             return;
-        _listener = new TcpListener(IPAddress.Loopback, _listenPort);
-        _listener.Start(50);
         _running = true;
         _cts = new CancellationTokenSource();
-        _acceptTask = Task.Run(() => AcceptLoop(_cts.Token));
-        LogService.Instance.Info($"代理已启动：127.0.0.1:{_listenPort} → {_remoteHost}:{_remotePort}");
+
+        _listener = new TcpListener(IPAddress.Loopback, _listenHttpPort);
+        _listener.Start(50);
+        _tasks.Add(Task.Run(() => AcceptLoop(_listener, _remoteHttpPort, _cts.Token)));
+
+        if (_enableWs)
+        {
+            _wsListener = new TcpListener(IPAddress.Loopback, _listenWsPort);
+            _wsListener.Start(50);
+            _tasks.Add(Task.Run(() => AcceptLoop(_wsListener, _remoteWsPort, _cts.Token)));
+            LogService.Instance.Info($"代理已启动：127.0.0.1:{_listenHttpPort}→{_remoteHost}:{_remoteHttpPort}，127.0.0.1:{_listenWsPort}→{_remoteHost}:{_remoteWsPort}");
+        }
+        else
+        {
+            LogService.Instance.Info($"代理已启动：127.0.0.1:{_listenHttpPort}→{_remoteHost}:{_remoteHttpPort}");
+        }
     }
 
     public void Stop()
@@ -52,6 +77,7 @@ public sealed class ProxyServer
         _running = false;
         _cts?.Cancel();
         try { _listener?.Stop(); } catch { /* 忽略 */ }
+        try { _wsListener?.Stop(); } catch { /* 忽略 */ }
         lock (_lock)
         {
             foreach (var client in _clients)
@@ -63,14 +89,14 @@ public sealed class ProxyServer
         LogService.Instance.Info("代理已停止");
     }
 
-    private async Task AcceptLoop(CancellationToken token)
+    private async Task AcceptLoop(TcpListener listener, int remotePort, CancellationToken token)
     {
-        while (_running && _listener is not null)
+        while (_running)
         {
             TcpClient client;
             try
             {
-                client = await _listener.AcceptTcpClientAsync(token);
+                client = await listener.AcceptTcpClientAsync(token);
             }
             catch
             {
@@ -80,11 +106,11 @@ public sealed class ProxyServer
             {
                 _clients.Add(client);
             }
-            _ = Task.Run(() => HandleConnection(client));
+            _ = Task.Run(() => HandleConnection(client, remotePort));
         }
     }
 
-    private async Task HandleConnection(TcpClient client)
+    private async Task HandleConnection(TcpClient client, int remotePort)
     {
         TcpClient? remote = null;
         try
@@ -92,7 +118,7 @@ public sealed class ProxyServer
             client.NoDelay = true;
             remote = new TcpClient { NoDelay = true };
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await remote.ConnectAsync(_remoteHost, _remotePort, timeoutCts.Token);
+            await remote.ConnectAsync(_remoteHost, remotePort, timeoutCts.Token);
 
             var clientStream = client.GetStream();
             var remoteStream = remote.GetStream();
@@ -102,9 +128,10 @@ public sealed class ProxyServer
             var r2c = ForwardAsync(remoteStream, clientStream, "R→C");
             await Task.WhenAny(c2r, r2c);
         }
-        catch
+        catch (Exception ex)
         {
-            // 连接中断是正常情况（游戏关闭、网络波动等）
+            // 连接失败/中断：记录一次（避免刷屏仅对连接异常打日志）
+            LogService.Instance.Write("PROXY", $"连接失败：{_remoteHost}:{remotePort}（{ex.Message}）");
         }
         finally
         {
