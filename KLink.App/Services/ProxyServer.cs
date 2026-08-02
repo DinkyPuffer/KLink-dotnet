@@ -151,9 +151,11 @@ public sealed class ProxyServer
             var clientStream = client.GetStream();
             var remoteStream = remote.GetStream();
 
-            // 双向转发（一方 EOF 即关闭另一方）
-            var c2r = ForwardAsync(clientStream, remoteStream, "C→R");
-            var r2c = ForwardAsync(remoteStream, clientStream, "R→C");
+            // 请求方向改写 Host 头为远程真实地址（远程服务器前有 CDN/反代会校验 Host，
+            // 游戏经本地代理后 Host=127.0.0.1:5231 会被 CDN 以 456 拒绝）
+            string rewriteHost = $"{_remoteHost}:{remotePort}";
+            var c2r = ForwardAsync(clientStream, remoteStream, "C→R", rewriteHost);
+            var r2c = ForwardAsync(remoteStream, clientStream, "R→C", null);
             await Task.WhenAny(c2r, r2c);
         }
         catch (Exception ex)
@@ -172,7 +174,10 @@ public sealed class ProxyServer
         }
     }
 
-    private static async Task ForwardAsync(NetworkStream from, NetworkStream to, string direction)
+    /// <summary>
+    /// 双向转发。请求方向（rewriteHost 非空）时改写首个数据包里的 Host 头。
+    /// </summary>
+    private static async Task ForwardAsync(NetworkStream from, NetworkStream to, string direction, string? rewriteHost)
     {
         var buffer = new byte[32768];
         bool first = true;
@@ -181,14 +186,25 @@ public sealed class ProxyServer
             int n;
             while ((n = await from.ReadAsync(buffer)) > 0)
             {
+                byte[] outData = buffer;
+                int outLen = n;
+                if (first && rewriteHost is not null)
+                {
+                    var rewritten = TryRewriteHost(buffer, n, rewriteHost);
+                    if (rewritten is not null)
+                    {
+                        outData = rewritten.Value.Data;
+                        outLen = rewritten.Value.Length;
+                    }
+                }
                 if (DebugLog && first)
                 {
-                    string head = System.Text.Encoding.UTF8.GetString(buffer, 0, Math.Min(n, 400))
+                    string head = System.Text.Encoding.UTF8.GetString(outData, 0, Math.Min(outLen, 400))
                         .Replace("\r\n", " ⏎ ").Replace("\n", " ⏎ ");
                     LogService.Instance.Write("PROXY", $"[{direction} 首包] {head}");
                     first = false;
                 }
-                await to.WriteAsync(buffer.AsMemory(0, n));
+                await to.WriteAsync(outData.AsMemory(0, outLen));
                 await to.FlushAsync();
             }
         }
@@ -201,5 +217,32 @@ public sealed class ProxyServer
             try { to.Close(); } catch { /* 忽略 */ }
             LogService.Instance.Write("PROXY", $"连接关闭（{direction}）");
         }
+    }
+
+    /// <summary>改写 HTTP 请求的 Host 头（返回 null 表示非 HTTP 或头不完整，原样转发）。</summary>
+    private static (byte[] Data, int Length)? TryRewriteHost(byte[] data, int length, string newHost)
+    {
+        if (length > 8192 || length < 12)
+            return null;
+        string head = System.Text.Encoding.ASCII.GetString(data, 0, length);
+        // 只处理 HTTP 请求首行（避免改动二进制/帧数据）
+        if (!head.StartsWith("GET ", StringComparison.Ordinal)
+            && !head.StartsWith("POST ", StringComparison.Ordinal)
+            && !head.StartsWith("PUT ", StringComparison.Ordinal)
+            && !head.StartsWith("DELETE ", StringComparison.Ordinal)
+            && !head.StartsWith("PATCH ", StringComparison.Ordinal)
+            && !head.StartsWith("OPTIONS ", StringComparison.Ordinal)
+            && !head.StartsWith("HEAD ", StringComparison.Ordinal))
+            return null;
+        int headerEnd = head.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        if (headerEnd < 0)
+            return null; // 头部未收完整，原样转发（首包一般已包含完整头）
+        string header = head[..headerEnd];
+        string rest = head[headerEnd..];
+        if (!System.Text.RegularExpressions.Regex.IsMatch(header, "(?im)^Host:.*$"))
+            return null;
+        string rewritten = System.Text.RegularExpressions.Regex.Replace(header, "(?im)^Host:.*$", "Host: " + newHost);
+        byte[] result = System.Text.Encoding.ASCII.GetBytes(rewritten + rest);
+        return (result, result.Length);
     }
 }
