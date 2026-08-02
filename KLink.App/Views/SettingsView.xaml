@@ -137,6 +137,9 @@
                             <TextBlock Text="端口" Margin="10,0,6,0" VerticalAlignment="Center"
                                        Foreground="{DynamicResource Brush.TextTertiary}" />
                             <ui:TextBox x:Name="TxtRemotePort" Width="80" VerticalContentAlignment="Center" />
+                            <TextBlock Text="WS 端口" Margin="10,0,6,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.TextTertiary}" />
+                            <ui:TextBox x:Name="TxtRemoteWsPort" Width="80" VerticalContentAlignment="Center" />
                         </StackPanel>
                     </Grid>
                 </StackPanel>

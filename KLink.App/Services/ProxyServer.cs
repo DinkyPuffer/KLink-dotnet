@@ -27,17 +27,42 @@ public sealed class ProxyServer
     private readonly object _lock = new();
 
     /// <param name="remoteHost">远程服务器地址。</param>
-    /// <param name="remoteHttpPort">远程 HTTP 端口；WebSocket 端口约定为 +1。</param>
-    /// <param name="listenPort">本地 HTTP 监听端口（默认 5231），WS 监听端口为 +1。</param>
+    /// <param name="remoteHttpPort">远程 HTTP 端口。</param>
+    /// <param name="listenPort">本地 HTTP 监听端口（默认 5231）。</param>
     /// <param name="enableWs">是否同时代理 WebSocket 端口（默认 true，游戏对战必需）。</param>
-    public ProxyServer(string remoteHost, int remoteHttpPort, int listenPort = 5231, bool enableWs = true)
+    /// <param name="remoteWsPort">远程 WebSocket 端口（默认 5232，KARDS 服务端标准 WS 端口）。</param>
+    /// <param name="listenWsPort">本地 WebSocket 监听端口（默认 = 远程 WS 端口，因客户端按服务器返回的 websocketurl 连本地对应端口）。</param>
+    public ProxyServer(string remoteHost, int remoteHttpPort, int listenPort = 5231, bool enableWs = true,
+        int? remoteWsPort = null, int? listenWsPort = null)
     {
         _remoteHost = remoteHost;
         _remoteHttpPort = remoteHttpPort;
-        _remoteWsPort = remoteHttpPort + 1;
+        _remoteWsPort = remoteWsPort ?? 5232;
         _listenHttpPort = listenPort;
-        _listenWsPort = listenPort + 1;
+        _listenWsPort = listenWsPort ?? _remoteWsPort;
         _enableWs = enableWs;
+    }
+
+    /// <summary>
+    /// 解析远程地址：支持 http(s)://host[:port]、host[:port]、host 三种格式，返回 (主机名, 端口)。
+    /// 地址未带端口时用 defaultPort。
+    /// </summary>
+    public static (string Host, int Port) ParseAddress(string input, int defaultPort)
+    {
+        string s = input.Trim();
+        if (s.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            s = s[7..];
+        else if (s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            s = s[8..];
+        // 去掉路径
+        int slash = s.IndexOf('/');
+        if (slash >= 0)
+            s = s[..slash];
+        // 提取端口（IPv6 用 [..]:port 形式，直接取最后一个冒号）
+        int colon = s.LastIndexOf(':');
+        if (colon >= 0 && int.TryParse(s[(colon + 1)..], out int port) && port > 0 && port < 65536)
+            return (s[..colon], port);
+        return (s, defaultPort);
     }
 
     public bool IsRunning => _running;

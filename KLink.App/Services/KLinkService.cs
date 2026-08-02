@@ -129,11 +129,14 @@ public sealed class KLinkService
     {
         if (string.IsNullOrWhiteSpace(remoteAddress))
             throw new ArgumentException("请输入远程服务器地址");
+        // 解析地址：支持 http(s)://host[:port]、host[:port]、host 格式
+        var (host, port) = ProxyServer.ParseAddress(remoteAddress, remotePort);
         // 屏蔽官方服务器域名
-        if (remoteAddress.ToLowerInvariant().Contains("kards.live.1939api.com"))
+        if (host.ToLowerInvariant().Contains("kards.live.1939api.com"))
             throw new ArgumentException("BLOCKED");
         _proxy?.Stop();
-        _proxy = new ProxyServer(remoteAddress.Trim(), remotePort);
+        int wsPort = _settings.Settings.RemoteWsPort > 0 ? _settings.Settings.RemoteWsPort : 5232;
+        _proxy = new ProxyServer(host, port, enableWs: true, remoteWsPort: wsPort);
         _proxy.Start();
     }
 

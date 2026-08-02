@@ -54,6 +54,7 @@ public partial class SettingsView : UserControl
             TxtAdminToken.Text = s.AdminToken;
             TxtRemoteAddress.Text = s.RemoteAddress;
             TxtRemotePort.Text = s.RemotePort.ToString();
+            TxtRemoteWsPort.Text = s.RemoteWsPort.ToString();
             TxtGameRoot.Text = s.GameRoot ?? "";
             TxtVersionPak.Text = string.IsNullOrWhiteSpace(s.VersionPakTemplate)
                 ? PakVersionPatcher.DefaultTemplatePath
@@ -156,6 +157,7 @@ public partial class SettingsView : UserControl
         s.AdminToken = TxtAdminToken.Text.Trim();
         s.RemoteAddress = TxtRemoteAddress.Text.Trim();
         s.RemotePort = int.TryParse(TxtRemotePort.Text, out var p) ? p : 5231;
+        s.RemoteWsPort = int.TryParse(TxtRemoteWsPort.Text, out var wp) ? wp : 5232;
         s.GameRoot = string.IsNullOrWhiteSpace(TxtGameRoot.Text) ? null : TxtGameRoot.Text.Trim();
         // 手动指定与默认路径一致时视为未指定（走内置模板自动提取）
         var versionPak = TxtVersionPak.Text.Trim();

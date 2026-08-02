@@ -11,6 +11,9 @@ public sealed class AppSettings
     public string HostName { get; set; } = "Host";
     public string RemoteAddress { get; set; } = "";
     public int RemotePort { get; set; } = 5231;
+
+    /// <summary>远程服务器 WebSocket 端口（客户端按服务器返回的 websocketurl 连本地对应端口，默认 5232）。</summary>
+    public int RemoteWsPort { get; set; } = 5232;
     public string LastMode { get; set; } = "local";
     public string PreferredPlayerName { get; set; } = "";
     public string AdminToken { get; set; } = "";
