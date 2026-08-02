@@ -16,7 +16,7 @@
         ExtendsContentIntoTitleBar="True"
         Background="{DynamicResource Brush.BgDeep}"
         AllowDrop="True"
-        DragOver="Window_DragOver" Drop="Window_Drop" DragLeave="Window_DragLeave">
+        PreviewDragOver="Window_PreviewDragOver" PreviewDrop="Window_PreviewDrop" DragLeave="Window_DragLeave">
     <ui:FluentWindow.Resources>
         <!-- 侧栏导航项 -->
         <Style x:Key="NavItem" TargetType="RadioButton">
@@ -71,8 +71,8 @@
         </Style>
     </ui:FluentWindow.Resources>
 
-    <!-- 根布局：自定义背景层 + 内容 + 四条感应光边 -->
-    <Grid>
+    <!-- 根布局：自定义背景层 + 内容 + 四条感应光边（RootGrid 为全窗口唯一拖放目标，统一处理文件拖放） -->
+    <Grid x:Name="RootGrid" AllowDrop="True" DragOver="RootGrid_DragOver" Drop="RootGrid_Drop">
         <!-- 自定义背景（图片/视频，设置页可配置；内容层透明以透出背景） -->
         <Grid x:Name="BackgroundHost" IsHitTestVisible="False">
             <Image x:Name="BgImage" Stretch="UniformToFill" Visibility="Collapsed" />
@@ -113,18 +113,20 @@
             </DockPanel>
         </Border>
 
-        <!-- 拖拽模组提示层（拖入 pak 时显示，覆盖全窗口） -->
+        <!-- 拖拽模组提示层（拖入 pak 时显示，覆盖全窗口；矩形卡片、不发光、背景半透明） -->
         <Border x:Name="DropOverlay" Grid.Row="0" Grid.RowSpan="2" Visibility="Collapsed"
-                Background="#CC050508" BorderBrush="{DynamicResource Brush.Emerald}" BorderThickness="3"
-                IsHitTestVisible="False" Panel.ZIndex="99">
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="14" Padding="44,26"
-                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                    BorderBrush="{DynamicResource Brush.Emerald}" BorderThickness="1">
+                Background="#80101018" IsHitTestVisible="False" Panel.ZIndex="99">
+            <Border Background="#E61B1B24" CornerRadius="0" Padding="56,36"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" MinWidth="400"
+                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
                 <StackPanel>
-                    <TextBlock Text="松开以安装模组" FontSize="24" FontWeight="SemiBold"
-                               Foreground="{DynamicResource Brush.EmeraldStrong}" HorizontalAlignment="Center" />
-                    <TextBlock x:Name="DropOverlayHint" Style="{DynamicResource HintText}" Margin="0,10,0,0"
-                               HorizontalAlignment="Center" />
+                    <ui:SymbolIcon Symbol="ArrowDownload24" FontSize="40"
+                                   Foreground="{DynamicResource Brush.EmeraldStrong}"
+                                   HorizontalAlignment="Center" />
+                    <TextBlock Text="松开以安装模组" FontSize="22" FontWeight="SemiBold" Margin="0,16,0,0"
+                               Foreground="{DynamicResource Brush.TextPrimary}" HorizontalAlignment="Center" />
+                    <TextBlock x:Name="DropOverlayHint" Style="{DynamicResource HintText}" Margin="0,8,0,0"
+                               HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="480" />
                 </StackPanel>
             </Border>
         </Border>
@@ -172,6 +174,14 @@
                         <StackPanel Orientation="Horizontal">
                             <ui:SymbolIcon Symbol="Box24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
                             <TextBlock Text="模组管理" FontSize="14" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="NavCards" Style="{DynamicResource NavItem}" GroupName="Nav"
+                                 Tag="cards" Checked="Nav_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Tag24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
+                            <TextBlock Text="卡牌管理" FontSize="14" Margin="12,0,0,0"
                                        Foreground="{DynamicResource Brush.TextPrimary}" />
                         </StackPanel>
                     </RadioButton>

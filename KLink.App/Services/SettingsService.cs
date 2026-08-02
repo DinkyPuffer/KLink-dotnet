@@ -30,6 +30,12 @@ public sealed class AppSettings
     /// <summary>背景图片/视频文件路径。</summary>
     public string? BackgroundPath { get; set; }
 
+    /// <summary>版本补丁模板 pak 路径（进入游戏前复制修改后写入 Paks 目录；为空则跳过）。</summary>
+    public string? VersionPakTemplate { get; set; }
+
+    /// <summary>注入游戏的版本号（写入模板 pak 的 ProjectVersion=，不能超过模板内容量）。</summary>
+    public string GameVersion { get; set; } = "KLink 29452.29452";
+
     [JsonIgnore]
     public bool HasCustomGameRoot => !string.IsNullOrWhiteSpace(GameRoot);
 }

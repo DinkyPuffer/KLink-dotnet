@@ -5,10 +5,14 @@ namespace KLink.Server;
 
 /// <summary>
 /// 游戏静态数据加载（AssetStore）。
-/// 数据文件以 EmbeddedResource 嵌入程序集：Assets/kards-server/{library,deck_code_ids,items}.json。
+/// 数据文件以 EmbeddedResource 嵌入程序集：Assets/kards-server/{library,deck_code_ids,items}.json；
+/// 若 exe 同级存在 data/kards-server 覆盖文件，则优先读取覆盖文件（卡牌/卡组 ID 管理器保存的修改在此生效，重启服务器后加载）。
 /// </summary>
 public sealed class AssetStore
 {
+    /// <summary>运行时覆盖文件目录：exe 同级 data\kards-server。保存修改后的数据会写到这里。</summary>
+    public static string OverrideDirectory => Path.Combine(AppContext.BaseDirectory, "data", "kards-server");
+
     private readonly object _lock = new();
     private JsonNode? _library;
     private JsonNode? _deckCodeIds;
@@ -45,6 +49,12 @@ public sealed class AssetStore
 
     private static JsonNode Load(string fileName)
     {
+        // 优先读取运行时覆盖文件（exe 同级 data\kards-server），卡牌/卡组 ID 管理器保存的修改在此生效
+        var overridePath = Path.Combine(OverrideDirectory, fileName);
+        if (File.Exists(overridePath))
+            return JsonNode.Parse(File.ReadAllText(overridePath))
+                ?? throw new InvalidOperationException($"覆盖文件 {overridePath} 解析失败");
+
         var assembly = Assembly.GetExecutingAssembly();
         // MSBuild 会把资源路径中的 '-' 转成 '_'，因此按文件名后缀匹配（如 ".library.json"）
         var resourceName = assembly.GetManifestResourceNames()

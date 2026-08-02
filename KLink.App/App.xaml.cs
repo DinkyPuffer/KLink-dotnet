@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 using KLink.App.Services;
 
 namespace KLink.App;
@@ -9,11 +10,33 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        // 临时：记录启动异常到 exe 目录
+        // 全局异常兜底：UI 线程异常记录日志并阻止崩溃（不闪退）
         DispatcherUnhandledException += (_, args) =>
         {
-            try { File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "crash.log"), args.Exception.ToString()); } catch { }
+            try
+            {
+                File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "crash.log"), args.Exception.ToString());
+                LogService.Instance.Error($"未处理异常（已拦截）：{args.Exception.Message}");
+            }
+            catch { }
+            args.Handled = true;
         };
+
+        // 拖放修复：WPF 拖放事件只发给鼠标下 AllowDrop=true 的最近元素（不走隧道路由），
+        // TextBox、部分 WPF-UI/自定义控件默认 AllowDrop=true 会吞掉文件拖放（禁止图标）。
+        // 统一在加载时禁用除 RootGrid 外所有元素的 AllowDrop，让拖放唯一命中根 Grid
+        EventManager.RegisterClassHandler(typeof(UIElement), FrameworkElement.LoadedEvent,
+            new RoutedEventHandler((s, _) =>
+            {
+                if (s is UIElement el && el is not Window)
+                {
+                    // RootGrid 是唯一允许的拖放目标（可视树顶层，任意位置都会命中它）
+                    if (Application.Current.MainWindow is MainWindow w
+                        && ReferenceEquals(el, w.FindName("RootGrid")))
+                        return;
+                    el.AllowDrop = false;
+                }
+            }), true);
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
             try { File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "crash.log"), args.ExceptionObject.ToString()); } catch { }

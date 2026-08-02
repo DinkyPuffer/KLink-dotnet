@@ -93,69 +93,86 @@ public sealed class ModManager
         }
     }
 
-    /// <summary>卸载模组：按基础名尝试 4 种后缀删除，再模糊匹配 _数字_P 格式。</summary>
+    /// <summary>卸载模组：按基础名尝试 4 种后缀删除，再模糊匹配 _数字_P 格式。失败不抛异常。</summary>
     public bool UninstallMod(string modName)
     {
         if (string.IsNullOrEmpty(modName))
             return false;
-        string baseName = modName.Replace(".pak", "", StringComparison.OrdinalIgnoreCase)
-            .Replace(".pak.disabled", "", StringComparison.OrdinalIgnoreCase);
-        string[] suffixes = { ".pak", ".pak.disabled", "_P.pak", "_P.pak.disabled" };
-        foreach (string suffix in suffixes)
+        try
         {
-            string file = Path.Combine(_pakPath, baseName + suffix);
-            if (File.Exists(file))
+            string baseName = modName.Replace(".pak", "", StringComparison.OrdinalIgnoreCase)
+                .Replace(".pak.disabled", "", StringComparison.OrdinalIgnoreCase);
+            string[] suffixes = { ".pak", ".pak.disabled", "_P.pak", "_P.pak.disabled" };
+            foreach (string suffix in suffixes)
             {
-                File.Delete(file);
-                LogService.Instance.Info($"模组已卸载：{baseName + suffix}");
-                return true;
-            }
-        }
-        // 模糊匹配 _数字_P 格式
-        if (Directory.Exists(_pakPath))
-        {
-            foreach (string file in Directory.EnumerateFiles(_pakPath))
-            {
-                string name = Path.GetFileName(file);
-                if (name.StartsWith(baseName + "_", StringComparison.OrdinalIgnoreCase)
-                    && name.Contains("_P.pak", StringComparison.OrdinalIgnoreCase))
+                string file = Path.Combine(_pakPath, baseName + suffix);
+                if (File.Exists(file))
                 {
                     File.Delete(file);
-                    LogService.Instance.Info($"模组已卸载：{name}");
+                    LogService.Instance.Info($"模组已卸载：{baseName + suffix}");
                     return true;
                 }
             }
+            // 模糊匹配 _数字_P 格式
+            if (Directory.Exists(_pakPath))
+            {
+                foreach (string file in Directory.EnumerateFiles(_pakPath))
+                {
+                    string name = Path.GetFileName(file);
+                    if (name.StartsWith(baseName + "_", StringComparison.OrdinalIgnoreCase)
+                        && name.Contains("_P.pak", StringComparison.OrdinalIgnoreCase))
+                    {
+                        File.Delete(file);
+                        LogService.Instance.Info($"模组已卸载：{name}");
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
-        return false;
+        catch (Exception ex)
+        {
+            // 文件被占用（游戏运行中）等场景：不崩溃，记日志
+            LogService.Instance.Error($"卸载模组失败：{ex.Message}");
+            return false;
+        }
     }
 
-    /// <summary>启用/禁用模组（重命名 .disabled 后缀）。</summary>
+    /// <summary>启用/禁用模组（重命名 .disabled 后缀）。失败不抛异常。</summary>
     public bool ToggleMod(string modName, bool enable)
     {
         if (string.IsNullOrEmpty(modName) || !Directory.Exists(_pakPath))
             return false;
-        string baseName = modName.Replace(".pak", "", StringComparison.OrdinalIgnoreCase)
-            .Replace(".pak.disabled", "", StringComparison.OrdinalIgnoreCase);
-        foreach (string file in Directory.EnumerateFiles(_pakPath))
+        try
         {
-            string name = Path.GetFileName(file);
-            if (!name.StartsWith(baseName, StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (enable && name.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase))
+            string baseName = modName.Replace(".pak", "", StringComparison.OrdinalIgnoreCase)
+                .Replace(".pak.disabled", "", StringComparison.OrdinalIgnoreCase);
+            foreach (string file in Directory.EnumerateFiles(_pakPath))
             {
-                string target = name[..^".disabled".Length];
-                File.Move(file, Path.Combine(_pakPath, target));
-                LogService.Instance.Info($"模组已启用：{target}");
-                return true;
+                string name = Path.GetFileName(file);
+                if (!name.StartsWith(baseName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (enable && name.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase))
+                {
+                    string target = name[..^".disabled".Length];
+                    File.Move(file, Path.Combine(_pakPath, target));
+                    LogService.Instance.Info($"模组已启用：{target}");
+                    return true;
+                }
+                if (!enable && !name.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Move(file, file + ".disabled");
+                    LogService.Instance.Info($"模组已禁用：{name}");
+                    return true;
+                }
             }
-            if (!enable && !name.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase))
-            {
-                File.Move(file, file + ".disabled");
-                LogService.Instance.Info($"模组已禁用：{name}");
-                return true;
-            }
+            return false;
         }
-        return false;
+        catch (Exception ex)
+        {
+            LogService.Instance.Error($"切换模组状态失败：{ex.Message}");
+            return false;
+        }
     }
 
     // ==================== 工具 ====================

@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Assets\kards-server\*.json" />
+    <EmbeddedResource Include="Assets\kards-server\*.pak" />
   </ItemGroup>
 
 </Project>

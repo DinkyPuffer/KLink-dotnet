@@ -36,15 +36,15 @@ public partial class ModsView : UserControl
 
     private void RefreshMods_Click(object sender, RoutedEventArgs e) => RefreshMods();
 
-    private void InstallMod_Click(object sender, RoutedEventArgs e)
+    private async void InstallMod_Click(object sender, RoutedEventArgs e)
     {
         if (_manager is null)
         {
-            new WpfUiMessageBox
+            await new WpfUiMessageBox
             {
                 Title = "KLink-dotnet",
                 Content = "请先在设置页配置游戏目录",
-            }.ShowDialog();
+            }.ShowDialogAsync();
             return;
         }
         var dialog = new OpenFileDialog
@@ -56,66 +56,125 @@ public partial class ModsView : UserControl
         if (dialog.ShowDialog() != true)
             return;
 
-        int ok = 0, renamed = 0;
-        foreach (string file in dialog.FileNames)
+        InstallPaks(dialog.FileNames.ToList());
+    }
+
+    /// <summary>后台安装模组列表（按钮与拖拽共用），完成后刷新列表并汇总提示。</summary>
+    public void InstallPaks(IReadOnlyList<string> files)
+    {
+        if (files.Count == 0)
+            return;
+        var manager = _manager ?? new ModManager(SettingsService.Instance.PaksDirectory ?? "");
+        // 后台安装，避免大文件复制卡死 UI
+        Task.Run(() =>
         {
-            string fileName = Path.GetFileName(file);
-            string targetName = ModManager.EnsurePakSuffix(fileName);
-            if (targetName != fileName)
-                renamed++;
-            string? result = _manager.InstallMod(file);
-            if (result is not null)
-                ok++;
-            else
+            int ok = 0, renamed = 0;
+            var skipped = new List<string>();
+            var failed = new List<string>();
+            foreach (string file in files)
             {
-                new WpfUiMessageBox
+                try
                 {
-                    Title = "KLink-dotnet",
-                    Content = $"安装失败：{fileName}",
-                }.ShowDialog();
+                    string fileName = Path.GetFileName(file);
+                    if (ModManager.IsBuiltinPak(fileName))
+                    {
+                        skipped.Add(fileName); // 游戏本体包，跳过
+                        continue;
+                    }
+                    if (ModManager.EnsurePakSuffix(fileName) != fileName)
+                        renamed++;
+                    if (manager.InstallMod(file) is not null)
+                        ok++;
+                    else
+                        failed.Add(fileName);
+                }
+                catch (Exception ex)
+                {
+                    LogService.Instance.Error($"安装 {file} 异常：{ex.Message}");
+                    failed.Add(Path.GetFileName(file));
+                }
             }
-        }
-        if (ok > 0)
-        {
-            var message = $"成功安装 {ok} 个模组。";
-            if (renamed > 0)
-                message += $"\n\n其中有 {renamed} 个已自动补 _P 后缀（PC 端引擎只加载 _P 结尾的 pak）。";
-            new WpfUiMessageBox
+            Dispatcher.BeginInvoke(async () =>
             {
-                Title = "KLink-dotnet",
-                Content = message,
-            }.ShowDialog();
-        }
-        RefreshMods();
+                RefreshMods();
+                var parts = new List<string>();
+                if (ok > 0)
+                    parts.Add($"已安装 {ok} 个模组");
+                if (renamed > 0)
+                    parts.Add($"其中 {renamed} 个已自动补 _P 后缀");
+                if (skipped.Count > 0)
+                    parts.Add($"跳过游戏本体包 {skipped.Count} 个");
+                if (failed.Count > 0)
+                    parts.Add($"失败 {failed.Count} 个：{string.Join("、", failed)}");
+                if (parts.Count > 0)
+                {
+                    await new WpfUiMessageBox
+                    {
+                        Title = "KLink-dotnet",
+                        Content = string.Join("\n", parts),
+                    }.ShowDialogAsync();
+                }
+            });
+        });
     }
 
     private void ToggleMod_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Wpf.Ui.Controls.Button { Tag: ModEntry entry } && _manager is not null)
+        if (sender is not Wpf.Ui.Controls.Button { Tag: ModEntry entry } button || _manager is null)
+            return;
+        var manager = _manager;
+        bool enable = !entry.Enabled;
+        button.IsEnabled = false;
+        Task.Run(() =>
         {
-            _manager.ToggleMod(entry.Name, !entry.Enabled);
-            RefreshMods();
-        }
+            bool ok = manager.ToggleMod(entry.Name, enable);
+            Dispatcher.BeginInvoke(() =>
+            {
+                button.IsEnabled = true;
+                if (!ok)
+                    LogService.Instance.Warn($"切换状态失败：{entry.Name}");
+                RefreshMods();
+            });
+        });
     }
 
-    private void UninstallMod_Click(object sender, RoutedEventArgs e)
+    private async void UninstallMod_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Wpf.Ui.Controls.Button { Tag: ModEntry entry } && _manager is not null)
+        if (sender is not Wpf.Ui.Controls.Button { Tag: ModEntry entry } || _manager is null)
+            return;
+        var confirm = new WpfUiMessageBox
         {
-            var confirm = new WpfUiMessageBox
+            Title = "KLink-dotnet",
+            Content = $"确定卸载模组「{entry.Name}」？",
+            PrimaryButtonText = "卸载",
+            SecondaryButtonText = "取消",
+        };
+        if (await confirm.ShowDialogAsync() != Wpf.Ui.Controls.MessageBoxResult.Primary)
+            return;
+
+        var manager = _manager;
+        // 后台卸载（文件被游戏占用时会等待/失败，不在 UI 线程阻塞）
+        Task.Run(() =>
+        {
+            bool ok = manager.UninstallMod(entry.Name);
+            Dispatcher.BeginInvoke(async () =>
             {
-                Title = "KLink-dotnet",
-                Content = $"确定卸载模组「{entry.Name}」？",
-                PrimaryButtonText = "卸载",
-                SecondaryButtonText = "取消",
-            };
-            if (confirm.ShowDialog() != true)
-                return;
-            if (_manager.UninstallMod(entry.Name))
-                LogService.Instance.Info($"模组已卸载：{entry.Name}");
-            else
-                LogService.Instance.Warn($"卸载失败：{entry.Name}");
-            RefreshMods();
-        }
+                if (ok)
+                {
+                    LogService.Instance.Info($"模组已卸载：{entry.Name}");
+                    RefreshMods();
+                }
+                else
+                {
+                    LogService.Instance.Warn($"卸载失败：{entry.Name}");
+                    await new WpfUiMessageBox
+                    {
+                        Title = "KLink-dotnet",
+                        Content = $"卸载「{entry.Name}」失败，文件可能被占用（请先关闭游戏后重试）。",
+                    }.ShowDialogAsync();
+                    RefreshMods();
+                }
+            });
+        });
     }
 }
