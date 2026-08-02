@@ -11,6 +11,9 @@ namespace KLink.App.Services;
 /// </summary>
 public sealed class ProxyServer
 {
+    /// <summary>调试日志开关：记录每个连接的首包(前 400 字节)，用于诊断远程服务器交互问题。</summary>
+    public static bool DebugLog { get; set; }
+
     private readonly string _remoteHost;
     private readonly int _remoteHttpPort;
     private readonly int _remoteWsPort;
@@ -172,11 +175,19 @@ public sealed class ProxyServer
     private static async Task ForwardAsync(NetworkStream from, NetworkStream to, string direction)
     {
         var buffer = new byte[32768];
+        bool first = true;
         try
         {
             int n;
             while ((n = await from.ReadAsync(buffer)) > 0)
             {
+                if (DebugLog && first)
+                {
+                    string head = System.Text.Encoding.UTF8.GetString(buffer, 0, Math.Min(n, 400))
+                        .Replace("\r\n", " ⏎ ").Replace("\n", " ⏎ ");
+                    LogService.Instance.Write("PROXY", $"[{direction} 首包] {head}");
+                    first = false;
+                }
                 await to.WriteAsync(buffer.AsMemory(0, n));
                 await to.FlushAsync();
             }
