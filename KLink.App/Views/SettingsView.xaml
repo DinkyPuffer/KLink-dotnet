@@ -69,7 +69,7 @@
             </Border>
 
             <!-- 版本补丁（功能一） -->
-<Border Style="{StaticResource ModernCard}" Padding="24,20">
+<Border Style="{StaticResource ModernCard}" Margin="0,20,0,0" Padding="24,20">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="版本补丁" />
 
@@ -90,7 +90,7 @@
             </Border>
 
             <!-- 服务器配置 -->
-<Border Style="{StaticResource ModernCard}" Padding="24,20">
+<Border Style="{StaticResource ModernCard}" Margin="0,20,0,0" Padding="24,20">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="服务器配置" />
                     <Grid Margin="0,16,0,0">
@@ -138,6 +138,55 @@
                             <ui:TextBox x:Name="TxtRemoteWsPort" Width="80" VerticalContentAlignment="Center" />
                         </StackPanel>
                     </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- 关于 -->
+<Border Style="{StaticResource ModernCard}" Margin="0,20,0,0" Padding="24,20">
+                <StackPanel>
+                    <TextBlock Style="{DynamicResource CardTitle}" Text="关于" />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <TextBlock Text="制作者" VerticalAlignment="Center" Width="70"
+                                   Foreground="{DynamicResource Brush.TextSecondary}" />
+                        <TextBlock VerticalAlignment="Center">
+                            <Hyperlink Tag="https://space.bilibili.com/3546971308559129" Click="OpenUrl_Click"
+                                       Foreground="{DynamicResource Brush.EmeraldStrong}" TextDecorations="None"
+                                       FontWeight="SemiBold">氧化铜依旧CuO</Hyperlink>
+                        </TextBlock>
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <TextBlock Text="特别感谢" VerticalAlignment="Center" Width="70"
+                                   Foreground="{DynamicResource Brush.TextSecondary}" />
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock VerticalAlignment="Center">
+                                <Hyperlink Tag="https://space.bilibili.com/1253227194" Click="OpenUrl_Click"
+                                           Foreground="{DynamicResource Brush.EmeraldStrong}" TextDecorations="None"
+                                           FontWeight="SemiBold">KardsWalker卡兹走路人</Hyperlink>
+                            </TextBlock>
+                            <TextBlock Text="、" Margin="4,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.TextSecondary}" />
+                            <TextBlock VerticalAlignment="Center">
+                                <Hyperlink Tag="https://space.bilibili.com/1180481405" Click="OpenUrl_Click"
+                                           Foreground="{DynamicResource Brush.EmeraldStrong}" TextDecorations="None"
+                                           FontWeight="SemiBold">末水的粉丝</Hyperlink>
+                            </TextBlock>
+                            <TextBlock Text="、" Margin="4,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.TextSecondary}" />
+                            <TextBlock Text="DeepSeek" Margin="4,0,0,0" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource Brush.EmeraldStrong}" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <TextBlock Margin="0,16,0,0" TextWrapping="Wrap"
+                               Foreground="{DynamicResource Brush.TextSecondary}">
+                        本项目完全免费且在
+                        <Hyperlink Tag="https://github.com/Xuewu-awa/KLink-dotnet" Click="OpenUrl_Click"
+                                   Foreground="{DynamicResource Brush.EmeraldStrong}" TextDecorations="None"
+                                   FontWeight="SemiBold">GitHub</Hyperlink>
+                        开源
+                    </TextBlock>
                 </StackPanel>
             </Border>
 

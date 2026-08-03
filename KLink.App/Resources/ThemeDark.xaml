@@ -40,24 +40,24 @@
     <SolidColorBrush x:Key="Brush.DangerTint" Color="#26C05040" />
 
     <!-- ============ 自用语义键 ============ -->
-    <SolidColorBrush x:Key="Brush.Emerald" Color="#9ED9CC" />
-    <SolidColorBrush x:Key="Brush.EmeraldStrong" Color="#B8F0E4" />
-    <SolidColorBrush x:Key="Brush.EmeraldMuted" Color="#6A9E92" />
-    <SolidColorBrush x:Key="Brush.BgDeep" Color="#050508" />
-    <SolidColorBrush x:Key="Brush.BgBase" Color="#0A0A0F" />
-    <SolidColorBrush x:Key="Brush.BgSurface" Color="#0E0E14" />
-    <SolidColorBrush x:Key="Brush.BgElevated" Color="#14141C" />
-    <SolidColorBrush x:Key="Brush.BgOverlay" Color="#1A1A24" />
+    <SolidColorBrush x:Key="Brush.Emerald" Color="#8CC9BA" />
+    <SolidColorBrush x:Key="Brush.EmeraldStrong" Color="#A8E0D2" />
+    <SolidColorBrush x:Key="Brush.EmeraldMuted" Color="#5E8A80" />
+    <SolidColorBrush x:Key="Brush.BgDeep" Color="#0F0F12" />
+    <SolidColorBrush x:Key="Brush.BgBase" Color="#141417" />
+    <SolidColorBrush x:Key="Brush.BgSurface" Color="#18181C" />
+    <SolidColorBrush x:Key="Brush.BgElevated" Color="#1E1E24" />
+    <SolidColorBrush x:Key="Brush.BgOverlay" Color="#26262E" />
     <!-- 现代卡片半透明背景（透出 Mica 毛玻璃） -->
-    <SolidColorBrush x:Key="Brush.ModernCardBackground" Color="#E614141C" />
+    <SolidColorBrush x:Key="Brush.ModernCardBackground" Color="#E61E1E24" />
     <SolidColorBrush x:Key="Brush.TextPrimary" Color="#ECECF0" />
-    <SolidColorBrush x:Key="Brush.TextSecondary" Color="#A0A0B0" />
-    <SolidColorBrush x:Key="Brush.TextTertiary" Color="#606070" />
+    <SolidColorBrush x:Key="Brush.TextSecondary" Color="#A6A6B2" />
+    <SolidColorBrush x:Key="Brush.TextTertiary" Color="#686876" />
     <SolidColorBrush x:Key="Brush.Danger" Color="#E05252" />
     <SolidColorBrush x:Key="Brush.Success" Color="#6FCF7A" />
 
     <!-- 选中态 / 悬浮态色调 -->
-    <SolidColorBrush x:Key="Brush.SelectionTint" Color="#1A2E2A" />
+    <SolidColorBrush x:Key="Brush.SelectionTint" Color="#1C322C" />
     <SolidColorBrush x:Key="Brush.HoverTint" Color="#14FFFFFF" />
 
     <!-- ============ 页面通用样式 ============ -->

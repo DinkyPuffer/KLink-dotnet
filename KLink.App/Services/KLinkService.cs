@@ -136,7 +136,6 @@ public sealed class KLinkService
             throw new ArgumentException("BLOCKED");
         _proxy?.Stop();
         int wsPort = _settings.Settings.RemoteWsPort > 0 ? _settings.Settings.RemoteWsPort : 5232;
-        ProxyServer.DebugLog = true; // 诊断远程交互(首包日志),问题解决后可关闭
         _proxy = new ProxyServer(host, port, enableWs: true, remoteWsPort: wsPort);
         _proxy.Start();
     }

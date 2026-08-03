@@ -43,6 +43,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IOleDropTarget
     private readonly RoomsView _roomsView = new();
     private readonly SettingsView _settingsView = new();
     private readonly CardManagerView _cardsView = new();
+    private readonly ConsoleView _consoleView = new();
     private readonly GameProcessService _game = new(SettingsService.Instance);
     private readonly KLinkService _service = KLinkService.Instance;
     private readonly System.Windows.Threading.DispatcherTimer _statusTimer;
@@ -338,6 +339,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IOleDropTarget
             case "rooms": NavFrame.Navigate(_roomsView); break;
             case "settings": NavFrame.Navigate(_settingsView); break;
             case "cards": NavFrame.Navigate(_cardsView); break;
+            case "console": NavFrame.Navigate(_consoleView); break;
         }
         // 页面切换淡入动画
         NavFrame.BeginAnimation(OpacityProperty,
@@ -353,6 +355,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IOleDropTarget
             case "rooms": NavRooms.IsChecked = true; break;
             case "settings": NavSettings.IsChecked = true; break;
             case "cards": NavCards.IsChecked = true; break;
+            case "console": NavConsole.IsChecked = true; break;
         }
     }
 
@@ -454,6 +457,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IOleDropTarget
                     BgImage.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(path!));
                     BgImage.Visibility = Visibility.Visible;
                     BgVideo.Visibility = Visibility.Collapsed;
+                    BgDim.Visibility = Visibility.Visible;
                 }
                 catch { ClearBackground(); }
                 break;
@@ -463,6 +467,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IOleDropTarget
                     BgVideo.Source = new Uri(path!);
                     BgVideo.Visibility = Visibility.Visible;
                     BgImage.Visibility = Visibility.Collapsed;
+                    BgDim.Visibility = Visibility.Visible;
                     BgVideo.Play();
                 }
                 catch { ClearBackground(); }
@@ -524,6 +529,7 @@ public partial class MainWindow : Wpf.Ui.Controls.FluentWindow, IOleDropTarget
         BgVideo.Stop();
         BgVideo.Source = null;
         BgVideo.Visibility = Visibility.Collapsed;
+        BgDim.Visibility = Visibility.Collapsed;
     }
 
     private void BgVideo_MediaEnded(object sender, RoutedEventArgs e)

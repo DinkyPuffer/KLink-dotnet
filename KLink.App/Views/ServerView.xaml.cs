@@ -36,11 +36,6 @@ public partial class ServerView : UserControl
         _statusTimer.Start();
 
         _service.StateChanged += () => Dispatcher.BeginInvoke(RefreshState);
-
-        // 控制台日志
-        LogService.Instance.HydrateSnapshot();
-        LogService.Instance.LogAdded += OnLogAdded;
-        Unloaded += (_, _) => LogService.Instance.LogAdded -= OnLogAdded;
     }
 
     // ==================== 模式 ====================
@@ -167,50 +162,5 @@ public partial class ServerView : UserControl
     {
         HeroDot.BeginAnimation(OpacityProperty, null);
         HeroDot.Opacity = 1;
-    }
-
-    // ==================== 控制台 ====================
-
-    private void OnLogAdded(string line)
-    {
-        Dispatcher.BeginInvoke(() =>
-        {
-            var snapshot = LogService.Instance.Snapshot;
-            if (snapshot.Count > 0)
-                LogList.ScrollIntoView(snapshot[^1]);
-        });
-    }
-
-    private void ExportLog_Click(object sender, RoutedEventArgs e)
-    {
-        var dialog = new SaveFileDialog
-        {
-            Title = "导出日志",
-            Filter = "日志文件 (*.log)|*.log|文本文件 (*.txt)|*.txt",
-            FileName = $"klink_log_{DateTime.Now:yyyyMMdd_HHmmss}.log",
-        };
-        if (dialog.ShowDialog() != true)
-            return;
-        try
-        {
-            LogService.Instance.Export(dialog.FileName);
-            LogService.Instance.Info($"日志已导出：{dialog.FileName}");
-            var result = new Wpf.Ui.Controls.MessageBox
-            {
-                Title = "KLink-dotnet",
-                Content = $"日志已导出到：\n{dialog.FileName}\n\n是否打开所在文件夹？",
-            };
-            if (result.ShowDialog() == true)
-                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{dialog.FileName}\"");
-        }
-        catch (Exception ex)
-        {
-            LogService.Instance.Error($"导出日志失败：{ex.Message}");
-        }
-    }
-
-    private void ClearLog_Click(object sender, RoutedEventArgs e)
-    {
-        LogService.Instance.Clear();
     }
 }

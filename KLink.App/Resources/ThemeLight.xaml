@@ -48,13 +48,13 @@
     <SolidColorBrush x:Key="Brush.Emerald" Color="#5C8A78" />
     <SolidColorBrush x:Key="Brush.EmeraldStrong" Color="#3D6B58" />
     <SolidColorBrush x:Key="Brush.EmeraldMuted" Color="#8AB8A4" />
-    <SolidColorBrush x:Key="Brush.BgDeep" Color="#E8E4DC" />
-    <SolidColorBrush x:Key="Brush.BgBase" Color="#EDEAE3" />
-    <SolidColorBrush x:Key="Brush.BgSurface" Color="#F2F0EA" />
-    <SolidColorBrush x:Key="Brush.BgElevated" Color="#ECE9E2" />
-    <SolidColorBrush x:Key="Brush.BgOverlay" Color="#E5E1D8" />
+    <SolidColorBrush x:Key="Brush.BgDeep" Color="#D8D4CC" />
+    <SolidColorBrush x:Key="Brush.BgBase" Color="#E2DED6" />
+    <SolidColorBrush x:Key="Brush.BgSurface" Color="#E9E6DF" />
+    <SolidColorBrush x:Key="Brush.BgElevated" Color="#F1EEE8" />
+    <SolidColorBrush x:Key="Brush.BgOverlay" Color="#D2CEC6" />
     <!-- 现代卡片半透明背景（透出 Mica 毛玻璃） -->
-    <SolidColorBrush x:Key="Brush.ModernCardBackground" Color="#E6ECE9E2" />
+    <SolidColorBrush x:Key="Brush.ModernCardBackground" Color="#F2F1EEE8" />
     <SolidColorBrush x:Key="Brush.TextPrimary" Color="#2A2822" />
     <SolidColorBrush x:Key="Brush.TextSecondary" Color="#5E5B52" />
     <SolidColorBrush x:Key="Brush.TextTertiary" Color="#8C887C" />

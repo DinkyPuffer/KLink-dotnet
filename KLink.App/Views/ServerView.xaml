@@ -37,7 +37,7 @@
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="16" />
-            <ColumnDefinition Width="360" />
+            <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
         <!-- ============ 左列 ============ -->
@@ -182,31 +182,5 @@
                 </ui:Button>
             </StackPanel>
         </StackPanel>
-
-        <!-- ============ 右列：控制台 ============ -->
-        <Grid Grid.Column="2">
-<Border Style="{StaticResource ModernCard}" Padding="16,14">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
-                    <DockPanel Grid.Row="0" Margin="2,0,0,10">
-                        <TextBlock Style="{DynamicResource CardTitle}" Text="控制台" VerticalAlignment="Center" />
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                            <ui:Button Content="导出日志" animations:ButtonAnimations.Enabled="True" Appearance="Secondary" Padding="10,4" FontSize="12"
-                                       Click="ExportLog_Click" />
-                            <ui:Button Content="清空" animations:ButtonAnimations.Enabled="True" Appearance="Secondary" Padding="10,4" FontSize="12"
-                                       Margin="6,0,0,0" Click="ClearLog_Click" />
-                        </StackPanel>
-                    </DockPanel>
-                    <ui:ListView x:Name="LogList" Grid.Row="1" Background="Transparent" BorderThickness="0"
-                                 FontFamily="Consolas, Microsoft YaHei UI" FontSize="11"
-                                 Foreground="{DynamicResource Brush.TextSecondary}"
-                                 ItemsSource="{Binding Snapshot, Source={x:Static services:LogService.Instance}}"
-                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" />
-                </Grid>
-            </Border>
-        </Grid>
     </Grid>
 </UserControl>

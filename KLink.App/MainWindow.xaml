@@ -79,6 +79,8 @@
             <MediaElement x:Name="BgVideo" Stretch="UniformToFill" LoadedBehavior="Manual"
                           UnloadedBehavior="Stop" Volume="0" Visibility="Collapsed"
                           MediaEnded="BgVideo_MediaEnded" />
+            <!-- 压暗遮罩：背景图片/视频之上叠深色，保证卡片半透明区域文字可读、整体统一 -->
+            <Border x:Name="BgDim" Background="#AD0F0F12" Visibility="Collapsed" />
         </Grid>
         <Border Background="Transparent">
             <Grid>
@@ -182,6 +184,14 @@
                         <StackPanel Orientation="Horizontal">
                             <ui:SymbolIcon Symbol="Tag24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
                             <TextBlock Text="卡牌管理" FontSize="14" Margin="12,0,0,0"
+                                       Foreground="{DynamicResource Brush.TextPrimary}" />
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="NavConsole" Style="{DynamicResource NavItem}" GroupName="Nav"
+                                 Tag="console" Checked="Nav_Checked">
+                        <StackPanel Orientation="Horizontal">
+                            <ui:SymbolIcon Symbol="Code24" FontSize="18" Foreground="{DynamicResource Brush.Emerald}" />
+                            <TextBlock Text="控制台" FontSize="14" Margin="12,0,0,0"
                                        Foreground="{DynamicResource Brush.TextPrimary}" />
                         </StackPanel>
                     </RadioButton>

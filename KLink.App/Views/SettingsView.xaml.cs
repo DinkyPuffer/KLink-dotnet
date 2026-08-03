@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using KLink.App.Services;
 using Microsoft.Win32;
 
@@ -204,6 +205,24 @@ public partial class SettingsView : UserControl
         if (dialog.ShowDialog() == true)
         {
             TxtVersionPak.Text = dialog.FileName;
+        }
+    }
+
+    // ==================== 关于 ====================
+
+    /// <summary>打开超链接（外部浏览器跳转）。</summary>
+    private void OpenUrl_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Hyperlink { Tag: string url } && Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                LogService.Instance.Error($"打开链接失败：{ex.Message}");
+            }
         }
     }
 }
