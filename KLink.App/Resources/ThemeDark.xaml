@@ -48,6 +48,8 @@
     <SolidColorBrush x:Key="Brush.BgSurface" Color="#0E0E14" />
     <SolidColorBrush x:Key="Brush.BgElevated" Color="#14141C" />
     <SolidColorBrush x:Key="Brush.BgOverlay" Color="#1A1A24" />
+    <!-- 现代卡片半透明背景（透出 Mica 毛玻璃） -->
+    <SolidColorBrush x:Key="Brush.ModernCardBackground" Color="#E614141C" />
     <SolidColorBrush x:Key="Brush.TextPrimary" Color="#ECECF0" />
     <SolidColorBrush x:Key="Brush.TextSecondary" Color="#A0A0B0" />
     <SolidColorBrush x:Key="Brush.TextTertiary" Color="#606070" />

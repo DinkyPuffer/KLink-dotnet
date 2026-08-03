@@ -86,6 +86,47 @@
                 <Setter Property="Padding" Value="16,8" />
                 <Setter Property="FontSize" Value="13" />
                 </Style>
+
+            <!-- ============ 现代卡片：矩形 + 浅翡翠细边框 + 半透明(透出 Mica) + 柔和阴影 + 悬停浮起 ============ -->
+            <Style x:Key="ModernCard" TargetType="Border">
+                <Setter Property="CornerRadius" Value="0" />
+                <Setter Property="BorderBrush" Value="#4A6A62" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="Background" Value="{DynamicResource Brush.ModernCardBackground}" />
+                <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+                <Setter Property="RenderTransform">
+                    <Setter.Value>
+                        <TranslateTransform X="0" Y="0" />
+                    </Setter.Value>
+                </Setter>
+                <Setter Property="Effect">
+                    <Setter.Value>
+                        <DropShadowEffect BlurRadius="22" ShadowDepth="4" Opacity="0.42" />
+                    </Setter.Value>
+                </Setter>
+                <Style.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                        <Trigger.EnterActions>
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetProperty="Effect.Opacity" To="0.62" Duration="0:0:0.18" />
+                                    <DoubleAnimation Storyboard.TargetProperty="Effect.BlurRadius" To="30" Duration="0:0:0.18" />
+                                    <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Y" To="-2" Duration="0:0:0.18" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </Trigger.EnterActions>
+                        <Trigger.ExitActions>
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetProperty="Effect.Opacity" To="0.42" Duration="0:0:0.18" />
+                                    <DoubleAnimation Storyboard.TargetProperty="Effect.BlurRadius" To="22" Duration="0:0:0.18" />
+                                    <DoubleAnimation Storyboard.TargetProperty="RenderTransform.Y" To="0" Duration="0:0:0.18" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </Trigger.ExitActions>
+                    </Trigger>
+                </Style.Triggers>
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

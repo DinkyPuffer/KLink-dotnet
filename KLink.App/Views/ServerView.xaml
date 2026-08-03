@@ -14,12 +14,7 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="RadioButton">
-                        <Border x:Name="Bd" Background="{DynamicResource Brush.BgSurface}" CornerRadius="0"
-                                Padding="12,14" BorderBrush="#4A6A62"
-                                BorderThickness="1" Cursor="Hand" MinHeight="86">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border x:Name="Bd" Background="{DynamicResource Brush.BgSurface}" CornerRadius="0" Padding="12,14" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1" Cursor="Hand" MinHeight="86">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
@@ -48,11 +43,7 @@
         <!-- ============ 左列 ============ -->
         <StackPanel Grid.Column="0">
             <!-- 状态 Hero -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="22,18"
-                    BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Padding="22,18">
                 <DockPanel>
                     <Border DockPanel.Dock="Left" Width="52" Height="52" CornerRadius="26"
                             Background="{DynamicResource Brush.SelectionTint}" VerticalAlignment="Center">
@@ -80,11 +71,7 @@
             </Border>
 
             <!-- 模式选择 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="18,16" Margin="0,14,0,0"
-                    BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Margin="0,14,0,0" Padding="18,16">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="运行模式" />
                     <Grid Margin="0,12,0,0">
@@ -133,12 +120,7 @@
             </Border>
 
             <!-- 远程地址（远程模式显示） -->
-            <Border x:Name="CardRemote" Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="18,14"
-                    Margin="0,14,0,0" BorderBrush="#4A6A62"
-                    BorderThickness="1" Visibility="Collapsed">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border x:Name="CardRemote" Style="{StaticResource ModernCard}" Margin="0,14,0,0" Padding="18,14" Visibility="Collapsed">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="远程服务器地址" />
                     <Grid Margin="0,10,0,0">
@@ -156,11 +138,7 @@
             </Border>
 
             <!-- 房间设置 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="18,14" Margin="0,14,0,0"
-                    BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Margin="0,14,0,0" Padding="18,14">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="房间设置" />
                     <Grid Margin="0,10,0,0">
@@ -207,11 +185,7 @@
 
         <!-- ============ 右列：控制台 ============ -->
         <Grid Grid.Column="2">
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="16,14"
-                    BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Padding="16,14">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

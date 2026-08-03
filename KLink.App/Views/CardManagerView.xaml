@@ -26,11 +26,7 @@
         </StackPanel>
 
         <!-- 数据文件路径 -->
-        <Border Grid.Row="2" Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="20,14"
-                BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Grid.Row="2" Padding="20,14">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -60,11 +56,7 @@
         </Border>
 
         <!-- 两个表格页 -->
-        <Border Grid.Row="4" Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="22,18"
-                BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Grid.Row="4" Padding="22,18">
             <TabControl Background="Transparent" BorderThickness="0">
                 <!-- ===== 卡牌代码（library.json） ===== -->
                 <TabItem>
@@ -197,11 +189,7 @@
         </Border>
 
         <!-- 操作按钮 + 日志 -->
-        <Border Grid.Row="6" Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="18,12"
-                BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Grid.Row="6" Padding="18,12">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />

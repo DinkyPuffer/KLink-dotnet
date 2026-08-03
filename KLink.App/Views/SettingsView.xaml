@@ -14,11 +14,7 @@
 
 
             <!-- 外观 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
-                    BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Padding="24,20">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="外观" />
 
@@ -56,12 +52,7 @@
             </Border>
 
             <!-- 游戏目录 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
-                    Margin="0,20,0,0"
-                    BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Margin="0,20,0,0" Padding="24,20">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="游戏目录" />
                     <TextBlock x:Name="TxtDetectedRoot" Style="{DynamicResource HintText}" Margin="0,6,0,0" />
@@ -78,11 +69,7 @@
             </Border>
 
             <!-- 版本补丁（功能一） -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
-                    Margin="0,20,0,0" BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Padding="24,20">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="版本补丁" />
 
@@ -103,11 +90,7 @@
             </Border>
 
             <!-- 服务器配置 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
-                    Margin="0,20,0,0" BorderBrush="#4A6A62" BorderThickness="1">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
-        </Border.Effect>
+<Border Style="{StaticResource ModernCard}" Padding="24,20">
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="服务器配置" />
                     <Grid Margin="0,16,0,0">
