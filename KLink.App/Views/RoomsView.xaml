@@ -1,4 +1,4 @@
-<UserControl x:Class="KLink.App.Views.RoomsView"
+﻿<UserControl x:Class="KLink.App.Views.RoomsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
@@ -20,8 +20,11 @@
 
         </StackPanel>
 
-        <Border Grid.Row="2" Background="{DynamicResource Brush.BgElevated}" CornerRadius="14" Padding="18,14"
-                BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+        <Border Grid.Row="2" Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="18,14"
+                BorderBrush="#4A6A62" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
+        </Border.Effect>
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />

@@ -1,4 +1,4 @@
-<UserControl x:Class="KLink.App.Views.SettingsView"
+﻿<UserControl x:Class="KLink.App.Views.SettingsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
@@ -14,8 +14,11 @@
 
 
             <!-- 外观 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="12" Padding="24,20"
-                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
+                    BorderBrush="#4A6A62" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
+        </Border.Effect>
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="外观" />
 
@@ -53,8 +56,12 @@
             </Border>
 
             <!-- 游戏目录 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="12" Padding="24,20"
-                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
+                    Margin="0,20,0,0"
+                    BorderBrush="#4A6A62" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
+        </Border.Effect>
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="游戏目录" />
                     <TextBlock x:Name="TxtDetectedRoot" Style="{DynamicResource HintText}" Margin="0,6,0,0" />
@@ -71,8 +78,11 @@
             </Border>
 
             <!-- 版本补丁（功能一） -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="12" Padding="24,20"
-                    Margin="0,20,0,0" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
+                    Margin="0,20,0,0" BorderBrush="#4A6A62" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
+        </Border.Effect>
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="版本补丁" />
 
@@ -93,8 +103,11 @@
             </Border>
 
             <!-- 服务器配置 -->
-            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="12" Padding="24,20"
-                    Margin="0,20,0,0" BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" BorderThickness="1">
+            <Border Background="{DynamicResource Brush.BgElevated}" CornerRadius="0" Padding="24,20"
+                    Margin="0,20,0,0" BorderBrush="#4A6A62" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="16" ShadowDepth="2" Opacity="0.35" />
+        </Border.Effect>
                 <StackPanel>
                     <TextBlock Style="{DynamicResource CardTitle}" Text="服务器配置" />
                     <Grid Margin="0,16,0,0">
