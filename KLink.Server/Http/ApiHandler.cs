@@ -15,12 +15,55 @@ namespace KLink.Server.Http;
 /// </summary>
 public sealed class ApiHandler
 {
-    /// <summary>JSON 序列化：与 Java org.json 一致(中文不转义为 \uXXXX, 紧凑无空格)。</summary>
+    /// <summary>JSON 序列化：与 Java org.json 一致(中文不转义为 \uXXXX, 紧凑无空格, 字符串内 / 转义为 \/)。</summary>
     private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
     {
-        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        Encoder = new OrgJsonEncoder(),
         WriteIndented = false,
     };
+
+    /// <summary>
+    /// 模拟 org.json 的字符串转义规则：除默认行为外，ASCII 斜杠 '/' 转义为 "\/"（org.json 对 URL 也转义，
+    /// 官方客户端已接受该格式）。System.Text.Json 默认不转义 '/'，导致响应字节与 Java 版不一致。
+    /// </summary>
+    private sealed class OrgJsonEncoder : System.Text.Encodings.Web.JavaScriptEncoder
+    {
+        private static readonly System.Text.Encodings.Web.JavaScriptEncoder Inner =
+            System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+
+        public override int MaxOutputCharactersPerInputCharacter => Inner.MaxOutputCharactersPerInputCharacter + 1;
+
+        public override bool WillEncode(int unicodeScalar)
+            => unicodeScalar == '/' || Inner.WillEncode(unicodeScalar);
+
+        public override unsafe int FindFirstCharacterToEncode(char* text, int textLength)
+        {
+            int inner = Inner.FindFirstCharacterToEncode(text, textLength);
+            for (int i = 0; i < textLength; i++)
+            {
+                if (text[i] == '/')
+                    return inner < 0 ? i : Math.Min(i, inner);
+            }
+            return inner;
+        }
+
+        public override unsafe bool TryEncodeUnicodeScalar(int unicodeScalar, char* buffer, int bufferLength, out int written)
+        {
+            if (unicodeScalar == '/')
+            {
+                if (bufferLength < 2)
+                {
+                    written = 0;
+                    return false;
+                }
+                buffer[0] = '\\';
+                buffer[1] = '/';
+                written = 2;
+                return true;
+            }
+            return Inner.TryEncodeUnicodeScalar(unicodeScalar, buffer, bufferLength, out written);
+        }
+    }
 
     private readonly ServerConfig _config;
     private readonly AppDatabase _database;
@@ -70,9 +113,18 @@ public sealed class ApiHandler
         {
             var result = Route(path, method, context);
             context.Response.StatusCode = result.Code;
-            context.Response.ContentType = result.ContentType;
+            // 与 Java SimpleHttpServer 一致：json 响应用小写 "content-type" 头，text 用大写 "Content-Type"
+            if (result.ContentType == "application/json")
+                context.Response.Headers["content-type"] = "application/json";
+            else
+                context.Response.Headers["Content-Type"] = result.ContentType;
             if (result.Body.Length > 0)
-                await context.Response.WriteAsync(result.Body);
+            {
+                // Content-Length 必须是 UTF-8 字节数（含中文时字节数 > 字符数，按字符数设置会被截断）
+                var bytes = System.Text.Encoding.UTF8.GetBytes(result.Body);
+                context.Response.ContentLength = bytes.Length;
+                await context.Response.Body.WriteAsync(bytes);
+            }
             ServerEvents.Log($"{method} {path} → {result.Code} ({sw.ElapsedMilliseconds}ms)");
         }
         catch (UnauthorizedException)
@@ -83,14 +135,17 @@ public sealed class ApiHandler
                 ["description"] = "Warning",
             };
             context.Response.StatusCode = 401;
-            context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync(error.ToJsonString(JsonOptions));
+            context.Response.Headers["content-type"] = "application/json";
+            var errorBytes = System.Text.Encoding.UTF8.GetBytes(error.ToJsonString(JsonOptions));
+            context.Response.ContentLength = errorBytes.Length;
+            await context.Response.Body.WriteAsync(errorBytes);
             ServerEvents.Log($"{method} {path} → 401 Unauthorized（JWT 无效或过期）");
         }
         catch (NotFoundException)
         {
             context.Response.StatusCode = 404;
             context.Response.ContentType = "text/plain; charset=utf-8";
+            context.Response.ContentLength = 9;
             await context.Response.WriteAsync("Not Found");
             ServerEvents.Log($"{method} {path} → 404 Not Found");
         }
@@ -98,8 +153,10 @@ public sealed class ApiHandler
         {
             var error = new JsonObject { ["error"] = e.ToString() };
             context.Response.StatusCode = 500;
-            context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync(error.ToJsonString(JsonOptions));
+            context.Response.Headers["content-type"] = "application/json";
+            var errorBytes = System.Text.Encoding.UTF8.GetBytes(error.ToJsonString(JsonOptions));
+            context.Response.ContentLength = errorBytes.Length;
+            await context.Response.Body.WriteAsync(errorBytes);
             ServerEvents.Log($"{method} {path} → 500 ERROR：{e}");
         }
     }
@@ -520,7 +577,9 @@ public sealed class ApiHandler
         json["season_end"] = "2027-01-01T00:00:00Z";
         json["season_id"] = 85;
         json["season_wins"] = 91;
-        json["server_options"] = ServerOptions(request);
+        // 与 Java 版一致:server_options 必须是 JSON 字符串(Java serverOptions() 返回 String,
+        // JSONObject.put 序列化为字符串;客户端按字符串再解析。.NET 若给对象会导致客户端解析不到 anzac 等选项)
+        json["server_options"] = ServerOptions(request).ToJsonString(JsonOptions);
         json["all_knockout_tourneys"] = new JsonArray();
         json["current_knockout_tourney"] = new JsonObject();
         json["current_mini_sit_n_go"] = CurrentMiniSitNGo();
@@ -1038,7 +1097,7 @@ public sealed class ApiHandler
         {
             new JsonObject
             {
-                ["title"] = "KLink Local Server",
+                ["title"] = "KARDS Local Server",
                 ["content"] = "Local Java backend is running.",
                 ["date"] = "2026-05-24",
                 ["type"] = "info",
@@ -1089,7 +1148,7 @@ public sealed class ApiHandler
     {
         ["above_left_message"] = new JsonObject
         {
-            ["title"] = "KLink Local Server",
+            ["title"] = "KARDS Local Server",
             ["text"] = "Local Java backend",
             ["link"] = "",
         },
@@ -1462,7 +1521,8 @@ public sealed class ApiHandler
             options["new_effect_icons"] = 1;
             options["feature_socketerror_popup_enabled"] = 1;
             options["versions"] = StringArray("Kards 1.47", "Kards 1.49", "Kards 1.50", "Kards 1.52",
-                "Kards 1.52.25476.launcher", "Kards 1.53", "Kards 1.54", "Kards 1.54.26471.APK", "Kards 1.56");
+                "Kards 1.52.25476.launcher", "Kards 1.53", "Kards 1.54", "Kards 1.54.26471.APK", "Kards 1.56",
+                "KLink 29452.29452"); // 与 Java 版一致:VersionPakManager.DEFAULT_VERSION(版本补丁默认值)
             var locked = new JsonArray();
             locked.Add(new JsonObject
             {

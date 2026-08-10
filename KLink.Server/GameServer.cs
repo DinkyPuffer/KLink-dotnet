@@ -59,6 +59,8 @@ public sealed class GameServer
             builder.WebHost.ConfigureKestrel(options =>
             {
                 var address = _config.BindHost == "0.0.0.0" ? IPAddress.Any : IPAddress.Parse(_config.BindHost);
+                // 与 Java SimpleHttpServer 一致：不发送 "Server: Kestrel" 头（客户端可能据此区分服务器实现）
+                options.AddServerHeader = false;
                 options.Listen(address, _config.HttpPort);   // HTTP + WS 升级
                 options.Listen(address, _config.WsPort);     // 纯 WS（Java 版为独立端口 5232）
             });
@@ -84,11 +86,15 @@ public sealed class GameServer
                         context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS";
                         context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, x-kards-room-admin";
                         context.Response.Headers["Access-Control-Max-Age"] = "86400";
+                        context.Response.Headers["Keep-Alive"] = "timeout=5";   // 与 Java SimpleHttpServer 一致
                         return;
                     }
                     context.Response.OnStarting(() =>
                     {
+                        // 与 Java SimpleHttpServer 一致：所有响应带 Access-Control-Allow-Origin: * 与 Keep-Alive: timeout=5
                         context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+                        context.Response.Headers["Keep-Alive"] = "timeout=5";
+                        context.Response.Headers["Connection"] = "keep-alive";
                         return Task.CompletedTask;
                     });
                     LogPacketRequest(context);   // 数据包：请求行 + 关键头
