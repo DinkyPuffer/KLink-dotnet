@@ -63,7 +63,9 @@ public sealed class LanDiscovery
 
     private async Task BroadcastLoop(CancellationToken token)
     {
-        var localIp = GetLocalIpAddress();
+        // 枚举所有网卡的子网定向广播地址(如 192.168.1.255、26.x.255),确保广播到达正确网段
+        var targets = GetSubnetBroadcastAddresses();
+        targets.Add(IPAddress.Broadcast); // 255.255.255.255 兜底
         while (_broadcasting && !token.IsCancellationRequested)
         {
             try
@@ -76,10 +78,20 @@ public sealed class LanDiscovery
                     ["httpPort"] = _httpPort,
                     ["wsPort"] = _wsPort,
                     ["players"] = _players,
-                    ["address"] = localIp,
+                    ["address"] = GetLocalIpAddress(),
                 };
                 byte[] data = Encoding.UTF8.GetBytes(msg.ToJsonString());
-                await _socket!.SendAsync(data, data.Length, new IPEndPoint(IPAddress.Broadcast, DiscoveryPort));
+                foreach (var target in targets)
+                {
+                    try
+                    {
+                        await _socket!.SendAsync(data, data.Length, new IPEndPoint(target, DiscoveryPort));
+                    }
+                    catch
+                    {
+                        // 单个目标失败不影响其他网卡
+                    }
+                }
             }
             catch
             {
@@ -94,6 +106,39 @@ public sealed class LanDiscovery
                 break;
             }
         }
+    }
+
+    /// <summary>枚举所有网卡的子网定向广播地址(IPv4, 由 IP &amp; 掩码 计算, 如 192.168.1.255)。</summary>
+    private static List<IPAddress> GetSubnetBroadcastAddresses()
+    {
+        var result = new List<IPAddress>();
+        try
+        {
+            foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != OperationalStatus.Up)
+                    continue;
+                if (ni.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                    continue;
+                foreach (var addr in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork)
+                        continue;
+                    var ip = addr.Address;
+                    var mask = addr.IPv4Mask;
+                    byte[] ipB = ip.GetAddressBytes();
+                    byte[] maskB = mask.GetAddressBytes();
+                    for (int i = 0; i < 4; i++)
+                        ipB[i] |= (byte)~maskB[i];
+                    result.Add(new IPAddress(ipB));
+                }
+            }
+        }
+        catch
+        {
+            // 忽略
+        }
+        return result;
     }
 
     // ==================== 扫描（客户端） ====================
@@ -167,6 +212,8 @@ public sealed class LanDiscovery
         {
             _socket = new UdpClient();
             _socket.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            // 发送 255.255.255.255 广播必须启用 Broadcast 选项，否则发送抛异常被吞(房间永远广播不出去)
+            _socket.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, true);
             _socket.Client.Bind(new IPEndPoint(IPAddress.Any, DiscoveryPort));
             _socket.Client.ReceiveTimeout = 3000;
         }

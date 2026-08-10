@@ -75,7 +75,40 @@ public sealed class GameServer
                     await context.Response.WriteAsync("Bad Request");
                 }
                 else
-                    await next();
+                {
+                    // CORS 头(与 Java 端一致:所有响应带 Access-Control-Allow-Origin: *),并处理 OPTIONS 预检
+                    if (HttpMethods.IsOptions(context.Request.Method))
+                    {
+                        context.Response.StatusCode = 204;
+                        context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+                        context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS";
+                        context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, x-kards-room-admin";
+                        context.Response.Headers["Access-Control-Max-Age"] = "86400";
+                        return;
+                    }
+                    context.Response.OnStarting(() =>
+                    {
+                        context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+                        return Task.CompletedTask;
+                    });
+                    LogPacketRequest(context);   // 数据包：请求行 + 关键头
+                    var originalBody = context.Response.Body;
+                    using var buffer = new MemoryStream();
+                    context.Response.Body = buffer;
+                    try
+                    {
+                        await next();
+                    }
+                    finally
+                    {
+                        context.Response.Body = originalBody;
+                        buffer.Position = 0;
+                        string body = new System.IO.StreamReader(buffer, System.Text.Encoding.UTF8).ReadToEnd();
+                        LogPacketResponse(context.Response.StatusCode, body);   // 数据包：状态 + 响应体开头
+                        buffer.Position = 0;
+                        await buffer.CopyToAsync(originalBody);
+                    }
+                }
             });
             _app.MapFallback((HttpContext ctx) => _httpHandler.Handle(ctx));
 
@@ -189,5 +222,47 @@ public sealed class GameServer
         if (!string.IsNullOrWhiteSpace(_config.AdvertisedHost))
             return _config.AdvertisedHost.Trim();
         return _config.BindHost == "0.0.0.0" ? "<device-ip>" : _config.BindHost;
+    }
+
+    // ==================== 数据包日志（[PKT]） ====================
+
+    /// <summary>记录请求包：方法 + 路径 + 查询 + 关键头（ApiKey/Authorization 脱敏截断）。</summary>
+    private static void LogPacketRequest(HttpContext context)
+    {
+        var req = context.Request;
+        string query = req.QueryString.HasValue ? req.QueryString.Value! : "";
+        string apiKey = Truncate(req.Headers["X-Api-Key"].ToString(), 60);
+        string auth = Truncate(req.Headers["Authorization"].ToString(), 40);
+        ServerEvents.Log($"[PKT] {req.Method} {req.Path}{query} | ApiKey: {apiKey} | Auth: {auth}");
+    }
+
+    /// <summary>记录响应包：状态码 + 响应体开头（单行、截断 1200 字符）；若含 server_options 则额外完整打印。</summary>
+    private static void LogPacketResponse(int status, string body)
+    {
+        string flat = body.Replace("\r", "").Replace("\n", " ");
+        string head = flat.Length > 1200 ? flat[..1200] + "…" : flat;
+        ServerEvents.Log($"[PKT] → {status} {head}");
+        // server_options 位于登录响应的末尾，截断看不到，单独完整打印便于分析
+        try
+        {
+            if (body.Contains("\"server_options\"", StringComparison.Ordinal))
+            {
+                var node = JsonNode.Parse(body);
+                var so = node?["server_options"];
+                if (so is not null)
+                    ServerEvents.Log($"[PKT] server_options: {so.ToJsonString()}");
+            }
+        }
+        catch
+        {
+            // 解析失败忽略
+        }
+    }
+
+    private static string Truncate(string s, int max)
+    {
+        if (string.IsNullOrEmpty(s))
+            return "-";
+        return s.Length > max ? s[..max] + "…" : s;
     }
 }

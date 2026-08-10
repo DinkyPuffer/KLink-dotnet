@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 using KLink.Server.Data;
@@ -15,6 +15,13 @@ namespace KLink.Server.Http;
 /// </summary>
 public sealed class ApiHandler
 {
+    /// <summary>JSON 序列化：与 Java org.json 一致(中文不转义为 \uXXXX, 紧凑无空格)。</summary>
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        WriteIndented = false,
+    };
+
     private readonly ServerConfig _config;
     private readonly AppDatabase _database;
     private readonly AssetStore _assets;
@@ -77,7 +84,7 @@ public sealed class ApiHandler
             };
             context.Response.StatusCode = 401;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync(error.ToJsonString());
+            await context.Response.WriteAsync(error.ToJsonString(JsonOptions));
             ServerEvents.Log($"{method} {path} → 401 Unauthorized（JWT 无效或过期）");
         }
         catch (NotFoundException)
@@ -92,7 +99,7 @@ public sealed class ApiHandler
             var error = new JsonObject { ["error"] = e.ToString() };
             context.Response.StatusCode = 500;
             context.Response.ContentType = "application/json";
-            await context.Response.WriteAsync(error.ToJsonString());
+            await context.Response.WriteAsync(error.ToJsonString(JsonOptions));
             ServerEvents.Log($"{method} {path} → 500 ERROR：{e}");
         }
     }
@@ -228,7 +235,7 @@ public sealed class ApiHandler
         => (code, "text/plain; charset=utf-8", text ?? "");
 
     private static (int, string, string) Json(int code, JsonNode? node)
-        => (code, "application/json", node?.ToJsonString() ?? "{}");
+        => (code, "application/json", node?.ToJsonString(JsonOptions) ?? "{}");
 
     // ==================== 免认证端点 ====================
 
@@ -1403,7 +1410,7 @@ public sealed class ApiHandler
             ["hasWon"] = false,
             ["id"] = 254937,
             ["name"] = "Skirmish #45",
-            ["rules_json_str"] = rules.ToJsonString(),
+            ["rules_json_str"] = rules.ToJsonString(JsonOptions),
             ["start_date"] = "2026-03-27T12:00:00.000000Z",
         };
     }
@@ -1432,7 +1439,7 @@ public sealed class ApiHandler
             options["appscale_mobile_max"] = 1.4;
             options["appscale_mobile_min"] = 1.0;
             options["appscale_tablet_min"] = 1.0;
-            options["battle_wait_time"] = 6000;
+            options["battle_wait_time"] = 60;
             options["brothers_in_arms_date"] = "2023.06.18-09.30.00";
             options["covert_ops_date"] = "2024.06.11-11.00.00";
             options["naval_warfare_date"] = "2025.05.22-12.00.00";
@@ -1444,6 +1451,11 @@ public sealed class ApiHandler
             options["winter_war_date"] = "2023.11.29-09.00.00";
             options["websocketurl"] = WebSocketUrl(request);
             options["homefront_date"] = "2025.11.27-09.00.00";
+            options["finland"] = 0;
+            options["achievements"] = 0;
+            options["avatars"] = 0;
+            options["broken_deck_check"] = 0;
+            options["key_encryption"] = 0;
             options["show_full_image"] = true;
             options["new_effect_bar"] = 1;
             options["new_effect_bar_pc"] = 1;
@@ -1507,6 +1519,9 @@ public sealed class ApiHandler
             host = request.Host.Value ?? "";
         if (string.IsNullOrWhiteSpace(host))
             host = "127.0.0.1:" + _config.HttpPort;
+        // AdvertisedHost 为纯 IP 时补 HTTP 端口（如 192.168.1.10 → 192.168.1.10:5231）
+        if (!host.Contains(':'))
+            host += ":" + _config.HttpPort;
         return "http://" + host;
     }
 
@@ -1533,6 +1548,9 @@ public sealed class ApiHandler
         }
         if (string.IsNullOrWhiteSpace(host))
             host = "127.0.0.1:" + _config.WsPort;
+        // AdvertisedHost 为纯 IP 时补 WS 端口（如 192.168.1.10 → 192.168.1.10:5232）
+        if (!host.Contains(':'))
+            host += ":" + _config.WsPort;
         return "ws://" + host + "/ws";
     }
 

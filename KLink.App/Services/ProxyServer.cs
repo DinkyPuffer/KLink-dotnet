@@ -1,3 +1,4 @@
+﻿using System.IO;
 using System.Net;
 using System.Net.Sockets;
 
@@ -174,13 +175,18 @@ public sealed class ProxyServer
         }
     }
 
+    /// <summary>数据包捕获上限（响应累计前 48KB，覆盖登录响应/server_options）。</summary>
+    private const int PacketCaptureMax = 48 * 1024;
+
     /// <summary>
     /// 双向转发。请求方向（rewriteHost 非空）时改写首个数据包里的 Host 头。
+    /// 同时捕获首个数据包（请求）/整段流（响应）用于 [PKT] 数据包日志。
     /// </summary>
     private static async Task ForwardAsync(NetworkStream from, NetworkStream to, string direction, string? rewriteHost)
     {
         var buffer = new byte[32768];
         bool first = true;
+        var captured = new MemoryStream(); // 响应方向累计数据包内容
         try
         {
             int n;
@@ -197,11 +203,16 @@ public sealed class ProxyServer
                         outLen = rewritten.Value.Length;
                     }
                 }
-                if (DebugLog && first)
+                // 累积数据包内容（前 PacketCaptureMax 字节）
+                if (captured.Length < PacketCaptureMax)
                 {
-                    string head = System.Text.Encoding.UTF8.GetString(outData, 0, Math.Min(outLen, 400))
-                        .Replace("\r\n", " ⏎ ").Replace("\n", " ⏎ ");
-                    LogService.Instance.Write("PROXY", $"[{direction} 首包] {head}");
+                    int take = Math.Min(outLen, PacketCaptureMax - (int)captured.Length);
+                    captured.Write(outData, 0, take);
+                }
+                if (first)
+                {
+                    if (direction == "C→R")
+                        LogPacketRequest(outData, outLen);   // 请求：首个包即完整头
                     first = false;
                 }
                 await to.WriteAsync(outData.AsMemory(0, outLen));
@@ -214,9 +225,73 @@ public sealed class ProxyServer
         }
         finally
         {
+            // 响应：流结束时用累计内容记录（含跨包 body）
+            if (direction == "R→C" && captured.Length > 0)
+                LogPacketResponse(captured.GetBuffer(), (int)captured.Length);
             try { to.Close(); } catch { /* 忽略 */ }
-            LogService.Instance.Write("PROXY", $"连接关闭（{direction}）");
+            if (DebugLog)
+                LogService.Instance.Write("PROXY", $"连接关闭（{direction}）");
         }
+    }
+
+    // ==================== 数据包日志（[PKT]，与服务器端一致） ====================
+
+    /// <summary>记录请求包：请求行 + Host + ApiKey + Authorization（脱敏截断）。</summary>
+    private static void LogPacketRequest(byte[] data, int length)
+    {
+        try
+        {
+            string head = System.Text.Encoding.UTF8.GetString(data, 0, Math.Min(length, 2048));
+            int headerEnd = head.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            if (headerEnd < 0)
+                headerEnd = head.Length;
+            string header = head[..headerEnd].Replace("\r\n", " ⏎ ");
+            // 提取关键头
+            string apiKey = ExtractHeader(head, "X-Api-Key");
+            string auth = ExtractHeader(head, "Authorization");
+            LogService.Instance.Write("PKT", $"[PKT] {header} | ApiKey: {Truncate(apiKey, 60)} | Auth: {Truncate(auth, 40)}");
+        }
+        catch { /* 解析失败忽略 */ }
+    }
+
+    /// <summary>记录响应包：状态行 + 响应体开头；含 server_options 时完整打印。</summary>
+    private static void LogPacketResponse(byte[] data, int length)
+    {
+        try
+        {
+            string flat = System.Text.Encoding.UTF8.GetString(data, 0, length).Replace("\r", "").Replace("\n", " ");
+            int bodyStart = flat.IndexOf(" ", StringComparison.Ordinal) + 1; // 略过 "HTTP/1.1"
+            int jsonStart = flat.IndexOf("{", StringComparison.Ordinal);
+            string statusLine = jsonStart >= 0 ? flat[..jsonStart].Trim() : flat;
+            string body = jsonStart >= 0 ? flat[jsonStart..] : "";
+            string shown = body.Length > 1000 ? body[..1000] + "…" : body;
+            LogService.Instance.Write("PKT", $"[PKT] → {statusLine} {shown}");
+            // server_options 完整打印（便于分析 anzac 等）
+            if (body.Contains("\"server_options\"", StringComparison.Ordinal))
+            {
+                int so = body.IndexOf("\"server_options\":", StringComparison.Ordinal) + 17;
+                LogService.Instance.Write("PKT", $"[PKT] server_options: {body[so..]}");
+            }
+        }
+        catch { /* 解析失败忽略 */ }
+    }
+
+    private static string ExtractHeader(string headerText, string name)
+    {
+        foreach (var line in headerText.Split('\n'))
+        {
+            var t = line.TrimEnd('\r').Trim();
+            if (t.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
+                return t[(name.Length + 1)..].Trim();
+        }
+        return "";
+    }
+
+    private static string Truncate(string s, int max)
+    {
+        if (string.IsNullOrEmpty(s))
+            return "-";
+        return s.Length > max ? s[..max] + "…" : s;
     }
 
     /// <summary>改写 HTTP 请求的 Host 头（返回 null 表示非 HTTP 或头不完整，原样转发）。</summary>

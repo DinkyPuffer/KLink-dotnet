@@ -111,11 +111,29 @@ public sealed class KLinkService
         var config = BuildServerConfig("0.0.0.0", roomName, hostName, adminToken, preferredPlayerName);
         config.HttpPort = httpPort;
         config.WsPort = wsPort;
+        // 局域网模式广告本机局域网 IP：客户端根据根响应 host_address 判断是否本机，
+        // 非 127.0.0.1 时才走免登录(使用本地玩家数据,含 ANZAC 等新国家)
+        config.AdvertisedHost = GetLanIpAddress();
         EnsureDatabaseDirectory();
         _kardsServer.Start(config, DatabasePath);
         // LAN 模式自动开始广播房间
         _lanDiscovery.SetRoomInfo(roomName, hostName, httpPort, wsPort, 0);
         _lanDiscovery.StartBroadcast();
+    }
+
+    /// <summary>获取本机局域网 IP（UDP 连接法，不实际发包）。失败回退 127.0.0.1。</summary>
+    private static string GetLanIpAddress()
+    {
+        try
+        {
+            using var socket = new System.Net.Sockets.UdpClient("8.8.8.8", 80);
+            var ep = socket.Client.LocalEndPoint as System.Net.IPEndPoint;
+            return ep?.Address.ToString() ?? "127.0.0.1";
+        }
+        catch
+        {
+            return "127.0.0.1";
+        }
     }
 
     private void EnsureDatabaseDirectory()
@@ -154,15 +172,9 @@ public sealed class KLinkService
             PreferredPlayerName = preferredPlayerName ?? "",
         };
 
-        // JWT 密钥：首次随机生成并持久化，避免硬编码
-        string? secret = _settings.Settings.JwtSecret;
-        if (string.IsNullOrEmpty(secret))
-        {
-            secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-            _settings.Settings.JwtSecret = secret;
-            _settings.Save();
-        }
-        config.JwtSecret = secret;
+        // JWT 密钥：固定与 Java 端(CometKards)一致——客户端(魔改版)本地生成的 JWT 用此密钥签名，
+        // 免登录校验必须通过，否则客户端走标准登录、丢失本地玩家数据(ANZAC 等新国家)
+        config.JwtSecret = "CometKards-is-a-help-much-kards-players-that-can't-find-gameuser-or-baned";
         return config;
     }
 
