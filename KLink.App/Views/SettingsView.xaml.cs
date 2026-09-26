@@ -20,7 +20,7 @@ public partial class SettingsView : UserControl
     {
         InitializeComponent();
         // 跟踪所有输入控件的修改
-        foreach (var tb in new[] { TxtRoomName, TxtHostName, TxtPlayerName, TxtAdminToken,
+        foreach (var tb in new[] { TxtRoomName, TxtHostName, TxtPlayerName, TxtAdminToken, TxtAdminDisplayName,
                                    TxtRemoteAddress, TxtRemotePort, TxtGameRoot,
                                    TxtVersionPak, TxtGameVersion })
             tb.TextChanged += (_, _) => MarkDirty();
@@ -53,6 +53,7 @@ public partial class SettingsView : UserControl
             TxtHostName.Text = s.HostName;
             TxtPlayerName.Text = s.PreferredPlayerName;
             TxtAdminToken.Text = s.AdminToken;
+            TxtAdminDisplayName.Text = s.AdminDisplayName;
             TxtRemoteAddress.Text = s.RemoteAddress;
             TxtRemotePort.Text = s.RemotePort.ToString();
             TxtRemoteWsPort.Text = s.RemoteWsPort.ToString();
@@ -156,6 +157,7 @@ public partial class SettingsView : UserControl
         s.HostName = TxtHostName.Text.Trim();
         s.PreferredPlayerName = TxtPlayerName.Text.Trim();
         s.AdminToken = TxtAdminToken.Text.Trim();
+        s.AdminDisplayName = TxtAdminDisplayName.Text.Trim();
         s.RemoteAddress = TxtRemoteAddress.Text.Trim();
         s.RemotePort = int.TryParse(TxtRemotePort.Text, out var p) ? p : 5231;
         s.RemoteWsPort = int.TryParse(TxtRemoteWsPort.Text, out var wp) ? wp : 5232;
@@ -207,6 +209,8 @@ public partial class SettingsView : UserControl
             TxtVersionPak.Text = dialog.FileName;
         }
     }
+
+    // ==================== 管理员界面 ====================
 
     // ==================== 关于 ====================
 

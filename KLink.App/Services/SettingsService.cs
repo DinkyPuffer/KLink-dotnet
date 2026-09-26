@@ -7,6 +7,12 @@ namespace KLink.App.Services;
 /// <summary>持久化配置模型，存储于启动器 exe 同级的 config.json。</summary>
 public sealed class AppSettings
 {
+    /// <summary>默认玩家名（设置页留空时使用，同时是 fyserver 侧 preferredPlayerName 的兜底值）。</summary>
+    public const string DefaultPlayerName = "氧化铜";
+
+    /// <summary>后台管理员显示名（设置页留空时使用）。</summary>
+    public const string DefaultAdminDisplayName = "管理员";
+
     public string RoomName { get; set; } = "KLink Room";
     public string HostName { get; set; } = "Host";
     public string RemoteAddress { get; set; } = "";
@@ -15,8 +21,18 @@ public sealed class AppSettings
     /// <summary>远程服务器 WebSocket 端口（客户端按服务器返回的 websocketurl 连本地对应端口，默认 5232）。</summary>
     public int RemoteWsPort { get; set; } = 5232;
     public string LastMode { get; set; } = "local";
-    public string PreferredPlayerName { get; set; } = "";
+    /// <summary>
+    /// 玩家默认显示名。会写入 fyserver 的 setting.json:preferredPlayerName，
+    /// 由 /session 在建号（或名为空）时套用为客户端里的 player_name；留空则用 <see cref="DefaultPlayerName"/>。
+    /// </summary>
+    public string PreferredPlayerName { get; set; } = DefaultPlayerName;
     public string AdminToken { get; set; } = "";
+
+    /// <summary>
+    /// 后台界面上显示的管理员名。会写入 fyserver 的 setting.json:adminDisplayName，
+    /// 本机免登录访问后台时 /session 用它作为 username；留空则用 <see cref="DefaultAdminDisplayName"/>。
+    /// </summary>
+    public string AdminDisplayName { get; set; } = DefaultAdminDisplayName;
 
     /// <summary>kds 游戏根目录（用户手动指定时非空）；为空则自动从启动器位置相对探测。</summary>
     public string? GameRoot { get; set; }
