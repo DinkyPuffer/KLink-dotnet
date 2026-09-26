@@ -29,8 +29,10 @@
 
         <DockPanel Grid.Row="0">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Bottom">
+                <ui:Button x:Name="BtnOpenAdmin" Content="进入管理员界面" Style="{DynamicResource SecondaryActionButton}"
+                           Icon="Globe24" Padding="14,6" Click="OpenAdmin_Click" />
                 <ui:Button Content="导出日志" Style="{DynamicResource SecondaryActionButton}"
-                           Icon="Save24" Padding="14,6" Click="ExportLog_Click" />
+                           Icon="Save24" Padding="14,6" Margin="8,0,0,0" Click="ExportLog_Click" />
                 <ui:Button Content="清空日志" Style="{DynamicResource SecondaryActionButton}"
                            Icon="Delete24" Padding="14,6" Margin="8,0,0,0" Click="ClearLog_Click" />
             </StackPanel>

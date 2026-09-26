@@ -8,6 +8,7 @@
         xmlns:animations="clr-namespace:KLink.App.Infrastructure"
         mc:Ignorable="d"
         Title="KLink-dotnet"
+        Icon="pack://application:,,,/Assets/klink.ico"
         Width="1160" Height="760"
         MinWidth="960" MinHeight="640"
         WindowStartupLocation="CenterScreen"

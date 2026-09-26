@@ -56,6 +56,29 @@ public partial class ConsoleView : UserControl
         AppendTerm("日志已清空");
     }
 
+    /// <summary>打开 fyserver 的 Web 管理后台（浏览器）。</summary>
+    private void OpenAdmin_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_service.ServerRunning || _service.CurrentMode == "remote")
+        {
+            AppendTerm("请先在「服务器」页启动本地或局域网服务器");
+            return;
+        }
+
+        string url = _service.GetAdminUiUrl();
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+            AppendTerm($"已在浏览器打开：{url}");
+            LogService.Instance.Info($"打开管理员界面：{url}");
+        }
+        catch (Exception ex)
+        {
+            AppendTerm($"打开管理员界面失败：{ex.Message}");
+            LogService.Instance.Error($"打开管理员界面失败：{ex.Message}");
+        }
+    }
+
     private async void ExportLog_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new SaveFileDialog

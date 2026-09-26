@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\KLink.Server\KLink.Server.csproj" />
@@ -14,6 +14,86 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <!-- 应用图标（exe 资源 + 任务栏/Alt-Tab）。图标由 tools/make-icons.ps1 从 Assets/klink-icon-source.jpg 生成。 -->
+    <ApplicationIcon>Assets\klink.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 供 MainWindow 的 Window.Icon 以 pack URI 引用；不设成 Content，避免往输出目录丢一份副本 -->
+    <Resource Include="Assets\klink.ico" />
+  </ItemGroup>
+
+  <!--
+    fyserver 打包装配。
+
+    服务端已由内嵌 KLink.Server 换成 CCB-TEAM/fyserver（独立进程，见 需求/fyserver集成规划.md），
+    而 FyServerHost 会在「宿主 exe 同级 data\fyserver\」下找 fyserver.exe，
+    因此这里把 fyserver 的构建产物 + 运行必需的数据目录在每次生成时同步过去。
+
+    源目录可通过 -p:FyServerSource=... 覆盖；目录不存在时静默跳过（不影响纯启动器开发）。
+    注意：library/ 三个 json 是 fyserver 的启动强依赖，缺失会在监听端口前直接崩溃，必须一起带。
+  -->
+  <PropertyGroup>
+    <!--
+      优先用自包含发布产物（tem\fyserver\publish\win-x64），没有才回退到构建输出。
+      理由：fyserver 是独立子进程，用不上启动器自带的运行时；若装配的是框架依赖版，
+      目标机器没装 .NET 10 时就会"启动器能开、服务端起不来"。
+      自包含产物由 tools/build-release.ps1 生成，也可以用
+      -p:FyServerSource=<目录> 手动指定。
+    -->
+    <FyServerSource Condition="'$(FyServerSource)' == '' And Exists('$(MSBuildThisFileDirectory)..\..\tem\fyserver\publish\win-x64\fyserver.exe')">$(MSBuildThisFileDirectory)..\..\tem\fyserver\publish\win-x64</FyServerSource>
+    <FyServerSource Condition="'$(FyServerSource)' == ''">$(MSBuildThisFileDirectory)..\..\tem\fyserver\bin\$(Configuration)\net10.0</FyServerSource>
+    <!--
+      显式拼出输出目录：$(OutDir) / $(TargetDir) 在 AfterTargets="Build" 之前求值，
+      此时还不含 TFM 子目录，会把文件拷到项目目录下的 data\fyserver（踩过一次）。
+    -->
+    <FyServerTarget>$(MSBuildProjectDirectory)\bin\$(Configuration)\$(TargetFramework)\data\fyserver\</FyServerTarget>
+  </PropertyGroup>
+
+  <Target Name="SyncFyServer" AfterTargets="Build" Condition="Exists('$(FyServerSource)\fyserver.exe')">
+    <ItemGroup>
+      <FyServerBinaries Include="$(FyServerSource)\*.dll;$(FyServerSource)\*.exe;$(FyServerSource)\*.json" />
+    </ItemGroup>
+    <!--
+      不用 SkipUnchangedFiles：它按时间戳比较，而本目标只在 KLink.App 自身重新构建时才跑，
+      增量构建（App 未变、只改了 fyserver）会整段跳过，导致启动器里的 fyserver 一直是旧的。
+      改为每次构建都覆盖；fyserver 正在运行时文件被占用，用 ContinueOnError 容忍。
+    -->
+    <Copy SourceFiles="@(FyServerBinaries)" DestinationFolder="$(FyServerTarget)" ContinueOnError="true" />
+    <!--
+      子目录用 xcopy 而不是 MSBuild 通配符：
+      评估期对目录项的字符串变换不会展开 `**`（MSB3030），
+      执行期 CreateItem 展开后又会丢 %(RecursiveDir) 元数据（文件被展平到根目录）。
+      xcopy /E /I /Y 保留目录结构且结果确定。fyserver 按 ./library、./config 相对路径读取，
+      因此这两个目录必须保持原样；wwwroot 同样保留结构（admin-ui 在其下）。
+    -->
+    <Exec Command="xcopy &quot;$(FyServerSource)\library&quot; &quot;$(FyServerTarget)library\&quot; /E /I /Y /Q" ContinueOnError="true" />
+    <Exec Command="xcopy &quot;$(FyServerSource)\config&quot; &quot;$(FyServerTarget)config\&quot; /E /I /Y /Q" ContinueOnError="true" />
+    <Exec Command="xcopy &quot;$(FyServerSource)\wwwroot&quot; &quot;$(FyServerTarget)wwwroot\&quot; /E /I /Y /Q" ContinueOnError="true" />
+    <Message Importance="high" Text="fyserver 已装配到 $(FyServerTarget)" />
+  </Target>
+
+  <Target Name="WarnMissingFyServer" AfterTargets="Build" Condition="!Exists('$(FyServerSource)\fyserver.exe')">
+    <Message Importance="high" Text="提示：未找到 fyserver 构建产物（$(FyServerSource)），data\fyserver 未装配。运行期启动服务器会提示缺少 fyserver。" />
+  </Target>
+
+  <!--
+    发布时把 data\fyserver 一并放进发布目录。
+
+    为什么单独开一个 Target：上面那个 SyncFyServer 挂在 Build 上、目标是 bin\<cfg>\<tfm>\，
+    而 dotnet publish 用的是 $(PublishDir)，两者不是同一个目录 ——
+    Build 跑完 publish 不会再拷一次，结果发布目录里缺 data\fyserver，启动器找不到服务端。
+    发布布局与开发布局保持一致：KLink.App.exe 同级 data\fyserver\。
+  -->
+  <Target Name="SyncFyServerOnPublish" AfterTargets="Publish" Condition="Exists('$(FyServerSource)\fyserver.exe')">
+    <ItemGroup>
+      <FyServerPublishBinaries Include="$(FyServerSource)\*.dll;$(FyServerSource)\*.exe;$(FyServerSource)\*.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(FyServerPublishBinaries)" DestinationFolder="$(PublishDir)data\fyserver\" ContinueOnError="true" />
+    <Exec Command="xcopy &quot;$(FyServerSource)\library&quot; &quot;$(PublishDir)data\fyserver\library\&quot; /E /I /Y /Q" ContinueOnError="true" />
+    <Exec Command="xcopy &quot;$(FyServerSource)\config&quot; &quot;$(PublishDir)data\fyserver\config\&quot; /E /I /Y /Q" ContinueOnError="true" />
+    <Exec Command="xcopy &quot;$(FyServerSource)\wwwroot&quot; &quot;$(PublishDir)data\fyserver\wwwroot\&quot; /E /I /Y /Q" ContinueOnError="true" />
+    <Message Importance="high" Text="fyserver 已装配到发布目录 $(PublishDir)data\fyserver\" />
+  </Target>
 
 </Project>
