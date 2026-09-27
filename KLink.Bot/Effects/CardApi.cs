@@ -724,17 +724,39 @@ public sealed partial class CardApi
         return card;
     }
 
-    /// <summary>把一张卡生成到战场（对应 SpawnCardOnBattlefield）。</summary>
-    public CardInstance SpawnOnBattlefield(Side side, string cardName)
+    /// <summary>把一张卡生成到战场（对应 `SpawnCardOnBattlefield`）。</summary>
+    /// <param name="frontline">
+    /// 落在**前线**（true）还是**半场**（false）—— 就是蓝图签名的第 2 个参数 `bool Frontline`
+    /// （`CardFunctionsStub.h:68`）。⚠️ 234 个调用点里 **215 个传 `false`**，
+    /// 旧实现写死 `BoardFrontline`，等于把这些卡全放错地方。
+    /// </param>
+    /// <param name="locationNumber">
+    /// 指定槽位；`-1`（IR 里 193/234 个调用点）表示"追加到队尾"。
+    /// </param>
+    public CardInstance SpawnOnBattlefield(Side side, string cardName,
+                                           bool frontline = true,
+                                           int locationNumber = -1,
+                                           bool newGiveBlitz = false,
+                                           bool forceGoldCard = false)
     {
-        var card = State.Create(cardName, side, CardLocation.BoardFrontline, 0);
+        CardLocation where = frontline ? CardLocation.BoardFrontline : side.HqOf();
+        var card = State.Create(cardName, side, where, 0, isGold: forceGoldCard);
         card.EnteredPlayOnTurn = State.Turn;
-        int slot = State.Board(side).Where(c => c != card).Select(c => c.LocationNumber).DefaultIfEmpty(-1).Max() + 1;
-        State.Move(card, CardLocation.BoardFrontline, slot);
+
+        int slot = locationNumber >= 0
+            ? locationNumber
+            : State.Cards(side, where).Where(c => c != card).Select(c => c.LocationNumber).DefaultIfEmpty(-1).Max() + 1;
+        State.Move(card, where, slot);
+
+        if (newGiveBlitz)
+        {
+            card.Keywords.Add(Keyword.Blitz);
+        }
+
         _engine.FireSubAction("ZActionSpawnCard", new[]
         {
             ActionValue2.Int("cardID", card.CardId),
-            ActionValue2.Int("location", (int)CardLocation.BoardFrontline),
+            ActionValue2.Int("location", (int)where),
         });
         return card;
     }

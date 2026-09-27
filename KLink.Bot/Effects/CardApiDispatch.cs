@@ -65,11 +65,41 @@ public sealed partial class CardApi
             ["IsCardReserved"] = (c, r, a) => false,           // TODO 待 BalancedCards 解出
             ["IsForecastCard"] = (c, r, a) => false,            // TODO 未知语义
             ["HasIntel"] = (c, r, a) => SelfArg(c, r, a) is { } x && JsonGetBool(x, "intel"),
-            ["HasCustomAbility"] = (c, r, a) => SelfArg(c, r, a) is { } x && HasCustomAbility(x),
-            ["HasCustomAbilityFromCard"] = (c, r, a) => AsCard(a.FirstOrDefault()) is { } x && HasCustomAbility(x),
+
+            // ⚠️ 这两个是**同形参数位错**（审计 §5.2），一起修：
+            // 权威签名（`BaseCardObject.h:946/943`）：
+            //   `HasCustomAbility(const FString& ability, bool& doesIt)`          —— 被检查的卡 = **接收者**
+            //   `HasCustomAbilityFromCard(const FString& ability, int32 giverID, bool& doesIt)` —— 同上
+            // 旧实现的两处错：
+            //   1. `HasCustomAbility` 没把能力名传下去（`CardApi.HasCustomAbility` 的
+            //      `ability` 默认 null）⇒ 变成"这张卡有**任意**自定义能力吗"，
+            //      11 个调用点里 `cantRetreat`/`cantBePinned`/`lethal`/`alpine`/
+            //      `destroyEndOfTurn` 混用时会互相误判。
+            //   2. `HasCustomAbilityFromCard` 拿 `a[0]` 当卡 —— 而 `a[0]` 是**能力名字符串**。
+            //      IR 实测（`out/audit/p0-argshapes.py`，52 个调用点，49 有 recv / 3 隐式）：
+            //      `a[0]` = `"trigger"`×20、`"destruction"`×13、`"passive"`×8、
+            //      `"ignoreCantAttack_location"`×4、`"targetAbility"`×3、`"excess"`×2 …
+            //      `AsCard("trigger")` = null ⇒ **恒 false**。
+            //      它的调用点之一是 `ExecuteOnCardDestroyedFunction` 的
+            //      `BooleanOR(hasDestruction, HasCustomAbilityFromCard("destruction", …))`
+            //      ⇒ 靠效果"获得摧毁能力"的卡全废。
+            //      `a[1]` 是 `giverID`（IR 里是 `cardID` 变量）—— "谁给的"这层语义
+            //      内核的 `CustomAbility` 是单值字段、没有来源，**不实现**（不猜）。
+            ["HasCustomAbility"] = (c, r, a)
+                => SelfArg(c, r, a) is { } x && HasCustomAbility(x, StrArgOrNull(a, 0)),
+            ["HasCustomAbilityFromCard"] = (c, r, a)
+                => SelfArg(c, r, a) is { } x && HasCustomAbility(x, StrArgOrNull(a, 0)),
             ["DoesSideControlTheFrontline"] = (c, r, a) => DoesSideControlTheFrontline(SideArg(r, a, 0)),
             ["IsSameSideUnit"] = (c, r, a) => a.Length >= 2 && AsCard(a[0]) is { } p && AsCard(a[1]) is { } q && IsSameSideUnit(p, q),
-            ["IsVeteran"] = (c, r, a) => AsCard(r) is { } v && v.Keywords.Contains(Keyword.Veteran),
+
+            // ⚠️ **隐式 self**（审计 §5.1）。权威签名 `BaseCardObject.h:841`：
+            //     `IsVeteran(bool ignoreSuppress, bool& isIt)` —— 零个"是哪张卡"的入参。
+            // IR 实测：75 个调用点里 **70 个没有 recv**（`{"bool": false}` + out 槽），
+            // 旧实现读 `AsCard(r)` ⇒ r 为 null ⇒ **恒 false**（41 张卡的老兵判据全反）。
+            // 正确写法与 `getTotalAttack`/`getTotalDefense` 同形：`SelfArg`（兜底 c.Self）。
+            // `ignoreSuppress`（a[0]）的语义**读不出来**（`BaseCardObject.h` 只有签名），
+            // 不实现、也不假装实现。
+            ["IsVeteran"] = (c, r, a) => SelfArg(c, r, a) is { } v && v.Keywords.Contains(Keyword.Veteran),
             ["GetKreditsBySide"] = (c, r, a) => c.State.Kredits(SideArg(r, a, 0, c.Controller)),
             ["GetMaxKreditsBySide"] = (c, r, a) => c.State.MaxKredits(SideArg(r, a, 0, c.Controller)),
 
@@ -89,20 +119,53 @@ public sealed partial class CardApi
             ["GetOppositeSide"] = (c, r, a) => (int)SelfSide(c).Opposite(),
             ["GetCardFromID"] = (c, r, a) => GetCardFromID(IntArg(a, 0)),
             ["GetLocationCardBySide"] = (c, r, a) => GetLocationCardBySide(SideArg(r, a, 2)),
-            ["GetCardsOnBoardBySide"] = (c, r, a) => GetCardsOnBoardBySide(SideArg(r, a, 0)).ToList(),
+
+            // ⚠️ **可选参数必须读**。权威签名（`CardFunctionsStub.h:437`）：
+            //     `GetCardsOnBoardBySide(ESideEnum side, bool unitsOnly, bool includeCovertCards, TArray& Cards)`
+            // 旧实现只读 `a[0]`（side），把 `unitsOnly` / `includeCovertCards` 整个丢掉 ——
+            // 252 个调用点全部按"所有卡"返回。IR 实测（`out/audit/p0-argshapes.py`）：
+            // `a[1]` = `true`×213 / `false`×39，`a[2]` = `false`×243 / `true`×9。
+            //
+            // `unitsOnly=false` 那一支**必须包含非单位卡**，证据（`card_unit_3rd_maizuru_snlf`
+            // 的 `OnPlayedFromHand`，card-ir.json 的 steps 0-6）：
+            // <code>
+            // step 1  GetCardsOnBoardBySide(oppositeSide, unitsOnly: false, false, out cards)
+            // step 2  GetRandomCard(cards, false, out randomCard)
+            // step 3  DamageCard(randomCard, 1, self, …)
+            // step 4  IsUnit(recv = randomCard)  →  step 5  jumpIfNot  →  step 6  PinUnit(randomCard)
+            // </code>
+            // 也就是说这张卡是"随机打敌方场上一张牌 1 点，**如果它是单位**再钉住它" ——
+            // 这个 `IsUnit` 分支只有在结果集**可能含非单位**时才有意义。
+            // 棋盘上唯一的非单位卡就是 HQ（位置卡），所以 `unitsOnly=false` ⇒ 含该方 HQ。
+            //
+            // `includeCovertCards` 读进来但**当前无效果**：本内核还没有建模 Covert
+            // （P1，见审计 §4「隐蔽 Covert」），没有"未揭示的隐蔽卡"这个状态可过滤。
+            // 记一笔未实现，别让它静默（数字小，不会淹没别的东西）。
+            ["GetCardsOnBoardBySide"] = (c, r, a) =>
+            {
+                var side = SideArg(r, a, 0, c.Controller);
+                if (TruthyArg(a, 2))
+                {
+                    c.State.UnimplementedCalls["GetCardsOnBoardBySide<includeCovertCards>"] =
+                        c.State.UnimplementedCalls.GetValueOrDefault("GetCardsOnBoardBySide<includeCovertCards>") + 1;
+                }
+
+                return TruthyArg(a, 1)
+                    ? GetCardsOnBoardBySide(side).ToList()
+                    : GetCardsOnBoardBySide(side).Concat(new[] { c.State.Hq(side) }).ToList();
+            },
             ["GetCardsInHandBySide"] = (c, r, a) => GetCardsInHandBySide(SideArg(r, a, 0)).ToList(),
             ["GetDeckByside"] = (c, r, a) => GetDeckBySide(SideArg(r, a, 0)).ToList(),
+
+            // 权威签名（`CardFunctionsStub.h:455/464`）：
+            //   `GetAllUnitsOnBoard(bool includeCovertCards, TArray& Cards)`
+            //   `GetAllCardsOnBoard(bool includeCovertCards, TArray& Cards)`
+            // 两个函数的**唯一**区别就是"单位"与"卡" —— 说明"场上所有卡"**严格多于**
+            // "场上所有单位"，多出来的只能是 HQ（棋盘上唯一的非单位卡）。
+            // 旧实现把 `a[0]` 当成 `includeHq` 解释（注释里还写了推理），
+            // 于是 90 个传 `false` 的调用点拿到的是"只有单位"，少了 HQ。
             ["GetAllUnitsOnBoard"] = (c, r, a) => GetAllUnitsOnBoard().ToList(),
-            // ⚠️ `GetAllCardsOnBoard(includeHq)` **不等于**「场上所有卡 + 两个 HQ」。
-            //    实测 `card_unit_214th_amur` 的 `OnEnterPlay` 用
-            //    `GetAllCardsOnBoard(false)` 枚举「要被光环影响的目标」，
-            //    而 HQ 不是单位、没有 subtype.t34，混进来只会白白空转。
-            //    旧实现返回 `GetAllUnitsOnBoard() + 双方 HQ`，等于让所有用它的卡
-            //    多循环两轮、并且可能把 HQ 当成合法目标。
-            //    这里按「布尔为是否包含 HQ」解释，默认不包含。
-            ["GetAllCardsOnBoard"] = (c, r, a) => a.Length > 0 && TruthyArg(a, 0)
-                ? GetAllCardsOnBoard().ToList()
-                : GetAllUnitsOnBoard().ToList(),
+            ["GetAllCardsOnBoard"] = (c, r, a) => GetAllCardsOnBoard().ToList(),
             ["GetAllCards"] = (c, r, a) => GetAllCards().ToList(),
             // ⚠️ 这两个是 **`BaseCardObject` 的原生成员函数**（UHT 签名
             //    `void getTotalAttack(int32& totalAttack)` / `void getTotalDefense(int32& totalDefense)`），
@@ -461,7 +524,11 @@ public sealed partial class CardApi
 
             // ---------------- 第二批补的原语（来自多卡组交叉验证）----------------
             ["IsGroundUnit"] = (c, r, a) => AsCard(r) is { } g && g.Definition.Type is "infantry" or "tank" or "artillery",
-            ["IsDamaged"] = (c, r, a) => AsCard(r) is { } d && d.Defense < d.MaxDefense,
+
+            // ⚠️ 同形接收者 bug（审计 §5.1）。权威签名 `BaseCardObject.h:904`：
+            //     `IsDamaged(bool& isIt)` —— 没有"是哪张卡"的入参。
+            // IR 实测：10 个调用点里 3 个无 recv（隐式 self），旧实现 `AsCard(r)` ⇒ 恒 false。
+            ["IsDamaged"] = (c, r, a) => SelfArg(c, r, a) is { } d && d.Defense < d.MaxDefense,
             ["IsBuffed"] = (c, r, a) => AsCard(r) is { } b && b.BuffsBySource.Count > 0,
             ["GetDestroyedCardsIDsThisBattle"] = (c, r, a) =>
             {
@@ -481,11 +548,21 @@ public sealed partial class CardApi
 
                 return null;
             },
+            // ⚠️ **数额在 `a[1]`，不在 `a[0]`**（审计 §5.2b）。
+            // 权威签名（`CardFunctionsStub.h:317`）：
+            //     `GiveKreditsBySide(ESideEnum side, int32 kredits, int32 instigatorID, bool& qqq)`
+            // 旧实现 `a.Select(AsInt).FirstOrDefault(v => v != 0)` 会把 **`a[0]`（= side，
+            // 帧里是 1 或 2）**当成数额 —— 于是"给 10 费"变成"给 1 费或 2 费"，
+            // 而且**随左右方变化**。IR 实测（52 个调用点）：
+            //     a[0] = `side`×46 / 其它×6      a[1] = 2×12、1×10、3×8、4×3、-2×3、-1×2、5×1…
+            //     a[2] = `cardID`（instigatorID） a[3] = out 槽
+            // 负数（-1/-2/-3/-7）扣费，`AddKredits` 自己会钳到 0。
+            // ⚠️ 不再保留旧的"数额为 0 就送 1"兜底：那是把 bug 当兜底，
+            //    会让"给 0 费"这种真实调用白送 1 费。
             ["GiveKreditsBySide"] = (c, r, a) =>
             {
                 var side = SideArg(r, a, 0, c.Controller);
-                int amount = a.Select(AsInt).FirstOrDefault(v => v != 0);
-                c.State.AddKredits(side, amount == 0 ? 1 : amount);
+                c.State.AddKredits(side, IntArg(a, 1));
                 return null;
             },
             ["AddToBattleLog"] = (c, r, a) => null,      // 纯日志
@@ -563,7 +640,10 @@ public sealed partial class CardApi
                                             && string.Equals(x.Name, c.Self?.Name, StringComparison.Ordinal),
             ["GetCardsPlayedThisTurn"] = (c, r, a) => c.State.CardsPlayedThisTurn.ToList(),
             ["getHasGameplayTag"] = (c, r, a) => HasGameplayTag(c, r, a),
-            ["getTotalHeavyArmor"] = (c, r, a) => AsCard(r)?.HeavyArmor ?? 0,
+
+            // ⚠️ 同形接收者 bug（审计 §5.1）。IR 实测：3 个调用点里 2 个无 recv，
+            //    旧实现 `AsCard(r)?.HeavyArmor ?? 0` ⇒ 恒 0（重甲查询失效）。
+            ["getTotalHeavyArmor"] = (c, r, a) => SelfArg(c, r, a)?.HeavyArmor ?? 0,
         };
 
     /// <summary>
@@ -1767,11 +1847,46 @@ public sealed partial class CardApi
         return null;
     }
 
+    /// <summary>
+    /// `SpawnCardOnBattlefield(side, Frontline, card_name, spawnerID, campaignName,
+    ///  NewGiveBlitz, locationNumber, salvageFaction, NewMakeVeteran, forceGoldCard,
+    ///  out spawnedCardID)` —— 权威签名 `CardFunctionsStub.h:68`。
+    ///
+    /// ⚠️ 旧实现只读 `a[0]`（side）+ 扫卡名，**其余可选参数全丢** —— 其中
+    /// <c>Frontline</c>（<c>a[1]</c>）是**落点**：丢掉它等于把 215 个传 `false`
+    /// 的调用点全部生成到**前线**。IR 实测（`out/audit/p0-argshapes.py`，234 个调用点）：
+    /// <code>
+    /// a[0] side   a[1] Frontline(false×215 / true×4 / 变量×15)   a[2] card_name
+    /// a[3] spawnerID   a[4] campaignName   a[5] NewGiveBlitz(false×169 / true×63)
+    /// a[6] locationNumber(-1×193)   a[7] salvageFaction   a[8] NewMakeVeteran(false×234)
+    /// a[9] forceGoldCard(false×233)   a[10] out
+    /// </code>
+    /// 本实现读：`Frontline`、`locationNumber`（-1 = 追加到队尾）、`NewGiveBlitz`、
+    /// `NewMakeVeteran`、`forceGoldCard`。
+    /// **不实现**：`campaignName`（战役）、`salvageFaction`（Salvage 关键字，P1 未建模）。
+    /// `spawnerID` 只用于"谁生成的"记账，当前内核没有对应字段，不假装实现。
+    /// </summary>
     private object? DoSpawnOnBattlefield(EffectContext c, object? r, object?[] a)
     {
         var side = SideArg(r, a, 0, c.Controller);
         string? cardName = a.Select(AsString).FirstOrDefault(s => s is not null && s.StartsWith("card_", StringComparison.Ordinal));
-        return cardName is null ? null : SpawnOnBattlefield(side, cardName);
+        if (cardName is null)
+        {
+            return null;
+        }
+
+        var card = SpawnOnBattlefield(side, cardName,
+            frontline: TruthyArg(a, 1),
+            locationNumber: IntArg(a, 6, -1),
+            newGiveBlitz: TruthyArg(a, 5),
+            forceGoldCard: TruthyArg(a, 9));
+
+        if (TruthyArg(a, 8))
+        {
+            MakeVeteran(card);
+        }
+
+        return card;
     }
 
     // ==================== 光环（aura）的实现 ====================
@@ -2128,7 +2243,12 @@ public sealed partial class CardApi
     /// </summary>
     private bool IsBuffedByCard(EffectContext c, object? r, object?[] a)
     {
-        if (AsCard(r) is not { } target)
+        // ⚠️ **接收者也要走 SelfArg**（审计 §5.1）：9 个调用点是隐式 self，
+        //    旧写法 `AsCard(r)` 在 r 为 null 时恒 false ⇒ 光环的
+        //    "这张卡我已经加过了吗"判据失效（会重复施加 buff）。
+        //    注意 `a[0]` 是来源卡 ID（int），`SelfArg` 只认 `CardInstance`，
+        //    所以扫参数不会把来源 ID 误当成接收者。
+        if (SelfArg(c, r, a) is not { } target)
         {
             return false;
         }
@@ -2159,7 +2279,10 @@ public sealed partial class CardApi
     /// </summary>
     private static bool HasGameplayTag(EffectContext c, object? r, object?[] a)
     {
-        if (AsCard(r) is not { } card)
+        // ⚠️ 接收者走 `SelfArg`（审计 §5.1：`getHasGameplayTag` 有 1 个隐式 self 调用点，
+        //    旧写法 `AsCard(r)` 在那里恒 false）。参数里都是 tag 字符串，
+        //    `SelfArg` 扫参数不会误判。
+        if (SelfArg(c, r, a) is not { } card)
         {
             return false;
         }
