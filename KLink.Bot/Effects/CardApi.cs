@@ -119,6 +119,27 @@ public sealed partial class CardApi
     /// 实测症状：`IsOrder(光环)` 恒假，85 先驱连永远不还原费用。
     /// 传 null 时退回 <paramref name="subject"/>（大部分事件两者本来就相同）。
     /// </param>
+    /// <param name="namedArgs">
+    /// 具名参数（按蓝图出参槽名）。`KismetVm.GetMember` 在具名载荷里找不到时，
+    /// 回退到位置参数 <paramref name="eventArgs"/>。
+    /// </param>
+    /// <param name="broadcastName">
+    /// **这个程序名本身是"广播给别人"的，即使它不以 `OnOther` 开头。**
+    ///
+    /// ⚠️ 为什么需要它：广播判据原先是纯命名约定（`StartsWith("OnOther")`），
+    /// 但蓝图里有一批广播名不满足这个约定，最典型的是
+    /// `OnBeforeOtherCardPlayedFromHand`（39 张订阅者）——
+    /// 它名字里带 `Other` 但前缀是 `OnBefore`，于是被当成"只发给主体"，
+    /// **39 张卡的整条分支静默死掉**。同一个坑还有
+    /// `OnAfterOtherCardSuppressed`（见 `SuppressUnit`，那里用 otherProgramName 绕开）。
+    ///
+    /// 出处（`out/bp-cardfn.json`，函数 `CardPlayedFromHand`）：
+    /// <code>
+    /// si=1322  FetchAllCardsWithEventTrigger(19)      ; 19 = OnBeforeOtherCardPlayedFromHand
+    /// si=1386      NotEqual_ObjectObject(item, cardPlayed)   ; ★ 广播**排除主体**
+    /// si=1493      item.OnBeforeOtherCardPlayedFromHand(cardPlayed)
+    /// </code>
+    /// </param>
     public void FireTrigger(string programName, CardInstance? subject, Side controller,
                             string? otherProgramName = null, string? selfProgramName = null,
                             IReadOnlyList<object?>? eventArgs = null,
@@ -126,7 +147,8 @@ public sealed partial class CardApi
                             CardInstance? eventSubject = null,
                             IReadOnlyDictionary<string, object?>? namedArgs = null,
                             CardLocation? oldLocation = null,
-                            CardLocation? newLocation = null)
+                            CardLocation? newLocation = null,
+                            bool broadcastName = false)
     {
         CardInstance? eventCard = eventSubject ?? subject;
         var library = Blueprint.KismetLibrary.Default;
@@ -203,7 +225,8 @@ public sealed partial class CardApi
             //    表现成"累计涨超"（T5 6/6、T7 11/12，比实际德国单位操作次数多）。
             //    它的 `OnOtherCardAttacks` 才是那条带阵营判定的分支。
             bool broadcast = selfProgramName is null
-                             && programName.StartsWith("OnOther", StringComparison.Ordinal);
+                             && (broadcastName
+                                 || programName.StartsWith("OnOther", StringComparison.Ordinal));
 
             if (broadcast)
             {
@@ -245,11 +268,17 @@ public sealed partial class CardApi
         //    把主体也算进去会让"刚抽到手的牌"响应自己的 `OnOtherCardDrawnFromDeck`。
         string subjectProgram = selfProgramName ?? programName;
         bool subjectBroadcast = selfProgramName is null
-                                && programName.StartsWith("OnOther", StringComparison.Ordinal);
+                                && (broadcastName
+                                    || programName.StartsWith("OnOther", StringComparison.Ordinal));
         if (!subjectBroadcast
             && subject is not null && subject.IsAlive && !subject.IsHq && !subject.Location.IsBoard()
             && library.FindProgram(subject.Name, subjectProgram) is not null)
         {
+            // ⚠️ 这一支**也必须记 TriggerTrace**。原先漏了它，于是"主体不在棋盘上"
+            //    （刚抽到手 / 刚生成到手 / 刚进弃牌堆…）的派发在诊断记录里**完全看不见** ——
+            //    自测据此判"没派发"，会把好代码判死。属于诊断口径的 bug，不是规则行为。
+            TriggerTrace?.Add($"{subjectProgram} → {subject.Name}#{subject.CardId}" +
+                              $"（eventCard={eventCard?.Name ?? "null"}#{eventCard?.CardId}，主体不在棋盘，兜底那一路）");
             RunTriggerProgram(library, subject, subject.Name, subjectProgram, eventCard, eventArgs, goingToLocation,
                               namedArgs, oldLocation, newLocation);
         }
@@ -413,6 +442,49 @@ public sealed partial class CardApi
         {
             _engine.Destroy(target, source);
         }
+    }
+
+    /// <summary>
+    /// 「在战斗里活下来了」—— 对应 `BP_CardFunctions::ExecuteOnSurvivedCombatEvents`
+    /// （`out/bp-cardfn.json`，25 条语句；9 张订阅 `OnSurvivedCombat`、6 张订阅
+    /// `OnOtherCardSurvivedCombat`）：
+    /// <code>
+    /// si=38   JumpIfNot(cardSurviving.isSuppressed) -> si=549   ; 被压制 ⇒ 不广播
+    /// si=74   FetchAllCardsWithEventTrigger(59)                ; 59 = OnOtherCardSurvivedCombat
+    /// si=343      NotEqual_IntInt(item.cardID, cardSurviving.cardID)   ; 广播**排除自己**
+    /// si=494      item.OnOtherCardSurvivedCombat(cardSurviving, cardCombatted)
+    /// si=549  cardSurviving.OnSurvivedCombat(cardCombatted)     ; ★ 自己：压制与否都发
+    /// </code>
+    /// 调用点（同一份 dump，`ExecuteAttackCard`）：si=3201 `(attacker, defender)`、
+    /// si=3249 `(defender, attacker)`，两者的门都是"**没被摧毁**"
+    /// （si=3186/3234 `JumpIfNot(xDestroyed)`），且整段在
+    /// si=3130 `IsUnit(defender)` 的 `PopExecutionFlowIfNot`（si=3171）之内 ——
+    /// 也就是**打 HQ 不触发这一族**。
+    ///
+    /// ⚠️ **本内核的近似**：蓝图先算好 `xDestroyed` 再发事件（语句顺序上事件在
+    /// "造成伤害"之前），内核没有那套预算，只能在伤害结算**之后**按
+    /// `IsAlive` 判"活下来了"。对活下来的卡，事件里的防御力因此已经是打完之后的值。
+    /// </summary>
+    public void FireSurvivedCombat(CardInstance surviving, CardInstance combatted)
+    {
+        if (!surviving.Keywords.Contains(Keyword.Suppressed))
+        {
+            FireTrigger("OnOtherCardSurvivedCombat", surviving, surviving.Owner,
+                eventArgs: new object?[] { surviving, combatted },
+                eventSubject: surviving,
+                namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["cardSurviving"] = surviving,
+                    ["cardCombatted"] = combatted,
+                });
+        }
+
+        FireTrigger("OnSurvivedCombat", surviving, surviving.Owner,
+            eventArgs: new object?[] { combatted },
+            namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["cardCombatted"] = combatted,
+            });
     }
 
     public void HealCard(CardInstance target, int amount)
@@ -678,13 +750,40 @@ public sealed partial class CardApi
         _engine.Destroy(target, source);
     }
 
-    public void DiscardCard(CardInstance card)
+    /// <summary>
+    /// 弃一张牌（对应 `BP_CardFunctions::DiscardCardFromHand` / `DiscardCard`）。
+    ///
+    /// <paramref name="discarder"/> 是"谁弃的"（事件第 2 个入参 `discarderID`）。
+    /// 内核大量调用点是"效果让某张牌被弃"，没有明确的施加者，
+    /// 这时传 null ⇒ `discarderID = 0`。**这是近似**，不猜一个假的施动者。
+    /// </summary>
+    public void DiscardCard(CardInstance card, CardInstance? discarder = null)
     {
+        bool suppressed = card.Keywords.Contains(Keyword.Suppressed);
         State.Move(card, CardLocation.Discard);
         _engine.FireSubAction("ZActionDiscardCard", new[]
         {
-            ActionValue2.Int("discarderID", card.CardId),
+            ActionValue2.Int("discarderID", discarder?.CardId ?? card.CardId),
         });
+
+        // 「别的卡被弃了」—— 出处 `out/bp-cardfn.json` 函数 `DiscardCardFromHand`
+        // （签名 `CardFunctionsStub.h`；9 张订阅者）：
+        //   si=500  JumpIfNot(tmpCardToDiscard.isSuppressed) -> si=1236   ; 被压制 ⇒ 不广播
+        //   si=536  FetchAllCardsWithEventTrigger(41)
+        //   si=809  item.OnOtherCardDiscarded(tmpCardToDiscard, discarderID)
+        // 广播集**不排除被弃的那张卡自己**（蓝图里没有 cardID 比对），
+        // 但内核 FireTrigger 的 `OnOther*` 约定会排除主体 —— 见 FireTrigger 的注释。
+        if (!suppressed)
+        {
+            FireTrigger("OnOtherCardDiscarded", card, card.Owner,
+                eventArgs: new object?[] { card, discarder?.CardId ?? 0 },
+                eventSubject: card,
+                namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["cardDiscarded"] = card,
+                    ["discarderID"] = discarder?.CardId ?? 0,
+                });
+        }
     }
 
     public void GiveKeyword(CardInstance target, string keyword)
@@ -761,6 +860,26 @@ public sealed partial class CardApi
             ActionValue2.Int("cardID", target.CardId),
         });
 
+        // ⚠️ **顺序照抄蓝图**：`SuppressMultipleUnits` 里"别人"那一遍在**前**、
+        //    被压制的卡自己的 `OnSuppressed()` 在**后**：
+        //      si=6074  item.OnAfterOtherCardSuppressed(_card)   ← 广播（触发号 11）
+        //      si=6194  _card.OnSuppressed()                      ← 自己
+        //      si=802   FetchAllCardsWithEventTrigger(58) → item.OnOtherCardSuppressed(_card)
+        //    （触发号 58 那一遍在 si=6230 `Jump 802` 之后，所以排在最后。）
+        // ⚠️ 名字以 `OnAfter` 开头、但语义是**广播**（蓝图 si=6074 那一遍遍历的是
+        //    `FetchAllCardsWithEventTrigger(11)` 的**全部订阅者**，没有排除自己）。
+        //    `FireTrigger` 的广播判据是「程序名以 `OnOther` 开头」，这个名字不满足，
+        //    所以必须**同时**用 `otherProgramName` 再发一遍 —— 只传 programName 的话
+        //    它只会发给主体，4 张订阅者里除主体外全部收不到。
+        FireTrigger("OnAfterOtherCardSuppressed", target, target.Owner,
+            otherProgramName: "OnAfterOtherCardSuppressed",
+            eventArgs: new object?[] { target },
+            eventSubject: target,
+            namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["card"] = target,
+            });
+
         FireTrigger("OnSuppressed", target, target.Owner);
         FireTrigger("OnOtherCardSuppressed", target, target.Owner,
             eventArgs: new object?[] { target },
@@ -771,6 +890,26 @@ public sealed partial class CardApi
             });
     }
 
+    /// <summary>
+    /// 让一张卡成为"老兵"（对应 `BP_CardFunctions::MakeVeteran`，81 条语句）。
+    ///
+    /// 蓝图控制流（UAssetCLI 的 **StatementIndex**；`out/bp-cardfn.json`）：
+    /// <code>
+    /// si=2427 JumpIfNot(card.isSuppressed) -> si=2806   ; 被压制 ⇒ 跳过整个广播段
+    /// si=2463 FetchAllCardsWithEventTrigger(32)         ; 32 = OnOtherCardBecomingVeteran
+    /// si=2736     item.OnOtherCardBecomingVeteran(card)
+    /// si=2842     Jump -> si=2463                       ; 循环回边
+    /// si=2782 ExecuteOnOtherCardsAbilitiesChanged(card) ; 能力集变了（同一段里，只一次）
+    /// si=2806 card.OnBecomingVeteran()                  ; ★ 自己：**压制与否都发**
+    /// </code>
+    /// 所以本内核的顺序是：广播（仅未被压制）→ 能力变化 → 自己。
+    ///
+    /// ⚠️ **没读懂的一处（不猜，照实说）**：si=2842 那条回边指向 si=2463（连订阅表都重取），
+    /// 而循环自增在 si=2847/2889 —— 两处读数在"什么条件下再跑一遍"上不自洽
+    /// （si=2672 的 `PushExecutionFlow(2847)` + si=2805 的 `PopExecutionFlow`
+    /// 也可能把流程直接送进出参段）。可观测的部分（广播一次 + 能力变化一次 + 自己一次）
+    /// 两种读法一致，所以按这一种实现。
+    /// </summary>
     public void MakeVeteran(CardInstance target)
     {
         if (target.Keywords.Add(Keyword.Veteran))
@@ -779,6 +918,22 @@ public sealed partial class CardApi
             {
                 ActionValue2.Int("cardID", target.CardId),
             });
+
+            // si=2427：被压制时**不广播** `OnOtherCardBecomingVeteran`（9 张订阅者）。
+            if (!target.Keywords.Contains(Keyword.Suppressed))
+            {
+                FireTrigger("OnOtherCardBecomingVeteran", target, target.Owner,
+                    eventArgs: new object?[] { target },
+                    eventSubject: target,
+                    namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+                    {
+                        ["card"] = target,
+                    });
+            }
+
+            // si=2782 ExecuteOnOtherCardsAbilitiesChanged(card)
+            FireAbilitiesChanged(target);
+
             FireTrigger("OnBecomingVeteran", target, target.Owner);
         }
     }

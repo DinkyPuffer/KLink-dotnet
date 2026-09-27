@@ -541,13 +541,16 @@ public sealed class MatchEngine
         //   = `OnBeforeOtherCardPlayedFromHand`。
         // 签名 `BaseCardObject.h:739`。**没有"自己"那一路** —— 39 张订阅者全是别人。
         // 时机：在卡离手/落场**之前**（蓝图的 `CardPlayedFromHand` 开头段就是这里）。
+        // ⚠️ 必须显式 `broadcastName: true`：这个名字以 `OnBefore` 开头、不是 `OnOther`，
+        //    靠命名约定判广播会把它当成"只发给主体" ⇒ 39 张订阅者全部收不到。
         Api.FireTrigger("OnBeforeOtherCardPlayedFromHand", card, card.Owner,
             eventArgs: new object?[] { card },
             eventSubject: card,
             namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
             {
                 ["cardPlayed"] = card,
-            });
+            },
+            broadcastName: true);
 
         // ---- ① 先离开手牌，再结算效果 ----
         //
@@ -886,6 +889,31 @@ public sealed class MatchEngine
             Api.DealDamage(attacker, defenderDamage, defender);
         }
 
+        // ---- 「战斗存活」----
+        //
+        // 出处 `out/bp-cardfn.json` 函数 `ExecuteAttackCard`（UAssetCLI StatementIndex）：
+        //   si=3130 IsUnit(defender) → si=3171 PopExecutionFlowIfNot  ; ★ 打 HQ 不进这一段
+        //   si=3186 JumpIfNot(attackerDestroyed) → si=3201
+        //   si=3201 ExecuteOnSurvivedCombatEvents(attacker, defender)
+        //   si=3234 JumpIfNot(defenderDestroyed) → si=3249
+        //   si=3249 ExecuteOnSurvivedCombatEvents(defender, attacker)
+        // `JumpIfNot(xDestroyed) -> <存活那一句>`：**为假（没被摧毁）才执行** ——
+        // 这点不是猜的：同一条语句上 Push/PopExecutionFlow 配的是"跳过整段"的落点
+        // （si=3181 PushExecutionFlow(3234) + si=3200 PopExecutionFlow）。
+        // 内核在伤害结算**之后**按 `IsAlive` 判（近似，见 CardApi.FireSurvivedCombat 的注释）。
+        if (Api.IsUnit(defender) && !defender.IsHq)
+        {
+            if (attacker.IsAlive)
+            {
+                Api.FireSurvivedCombat(attacker, defender);
+            }
+
+            if (defender.IsAlive)
+            {
+                Api.FireSurvivedCombat(defender, attacker);
+            }
+        }
+
         FireSubAction("ZActionAttackCard", new[]
         {
             ActionValue2.Int("attackerCardID", attacker.CardId),
@@ -1073,7 +1101,35 @@ public sealed class MatchEngine
 
         Say($"{card} 被摧毁");
 
-        Api.FireTrigger("OnBeforeDestroyed", card, card.Owner);
+        // ---- 「即将被摧毁」----
+        //
+        // 出处 `out/bp-cardfn.json` 函数 `ExecuteOnBeforeOtherCardDestroyed`
+        // （`cardDestroyedID, AttackerID, TriggerNotDestroyed, DestroyedInCombat`，30 条语句）：
+        // <code>
+        // si=140  JumpIfNot(_cardDestroyed.isSuppressed) -> si=520   ; ★ 被压制 ⇒ 两个名字都不发
+        // si=176  FetchAllCardsWithEventTrigger(15)                  ; 15 = 这一族
+        // si=445      EqualEqual_IntInt(cardDestroyedID, item.cardID)
+        // si=505      JumpIfNot(...) -> si=653
+        // si=520          _cardDestroyed.OnBeforeDestroyed(_attacker, TriggerNotDestroyed)    ← 自己
+        // si=653      item.OnBeforeOtherCardDestroyed(_cardDestroyed, _attacker,
+        //                                            TriggerNotDestroyed, DestroyedInCombat) ← 别人
+        // </code>
+        // ⇒ 一次 FireTrigger 同时覆盖"自己那一路"和"别人那一路"；
+        //   被压制的卡**两个都不发**（旧实现无条件发 `OnBeforeDestroyed`）。
+        // `DestroyedInCombat` 这个入参内核没有建模，恒传 false（近似，不猜）。
+        if (!card.Keywords.Contains(Keyword.Suppressed))
+        {
+            Api.FireTrigger("OnBeforeDestroyed", card, card.Owner, "OnBeforeOtherCardDestroyed",
+                eventArgs: new object?[] { card, destroyer, false, false },
+                eventSubject: card,
+                namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["cardDestroyed"] = card,
+                    ["attacker"] = destroyer,
+                    ["TriggerNotDestroyed"] = false,
+                    ["DestroyedInCombat"] = false,
+                });
+        }
 
         FireSubAction("ZActionDestroyUnit", new[]
         {
