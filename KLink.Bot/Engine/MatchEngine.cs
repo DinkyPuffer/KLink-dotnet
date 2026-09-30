@@ -1309,6 +1309,40 @@ public sealed class MatchEngine
 
         State.Move(card, CardLocation.Discard);
         Api.FireTrigger("OnDestroyed", card, card.Owner, "OnOtherCardDestroyed");
+
+        // ---- 「一个摧毁效果触发了」（事件 24）----
+        //
+        // 出处 `out/bp-cardfn.json` 的 `TriggerDestruction`：
+        // <code>
+        // si=905   BooleanAND(Not(CustomName1HasAttribute("StopDestructionEffect")), card.hasDestruction)
+        // si=965   PopExecutionFlowIfNot(...)                      ; 假 ⇒ 整块跳过
+        // si=1237  localCardUsedForTriggeringDestructionEffect.OnDestroyed(NoObject{}, true)
+        // si=1286  ExecuteOnDestructionEffectTriggered(..., out TriggerMultiple)
+        // si=1346  if (TriggerMultiple &gt; 0) { loop 1..TriggerMultiple: si=1515 再整轮派发 }
+        // </code>
+        //
+        // ⚠️ **这里只加事件 24，没有给上面那句 `OnDestroyed` 加 `hasDestruction` 门** ——
+        //    是查过之后有意不加的，不是漏了：
+        //    IR 里订阅 `OnDestroyed` 的有 79 张卡，其中 **7 张没有 `hasDestruction`**。
+        //    逐张看过它们的函数体，**不是空壳**：
+        //      · `card_unit_daimler_mk_ii_cam1` / `card_unit_kumamoto_regiment_cam1`
+        //        —— `HasCampaignUpgrade(6)` 门后面才是战役升级效果
+        //      · `card_unit_14_panzergrenadier` —— `IsVeteran` / `RemovePinnedOverride` 收尾
+        //      · `card_unit_superman` —— `CustomName1Remove("StopDestructionEffect")` 收尾
+        //      · 另 3 张（`641st_rifles` / `dornier_do_17` / `t_28_pincer`）确实是空壳
+        //    也就是说「`OnDestroyed` ⟺ hasDestruction」这条不成立：这些卡的 `OnDestroyed`
+        //    是**另一条路径**进来的。拿 `hasDestruction` 去卡它们会静默砍掉 4 张卡的真实逻辑，
+        //    所以宁可保持原样、把不确定性写在这里。
+        //    事件 24 那一侧没有这个矛盾：4 张订阅者的卡面文本**全部**写着
+        //    "when a Destruction effect triggers"，门取 `hasDestruction ‖ HasCustomAbility`。
+        if (Api.ShouldTriggerDestructionEffect(card))
+        {
+            int extra = Api.FireDestructionEffectTriggered(card, destroyer);
+            for (int i = 0; i < extra; i++)
+            {
+                Api.FireDestructionEffectTriggered(card, destroyer);
+            }
+        }
     }
 
     // ==================== 动作记录 ====================

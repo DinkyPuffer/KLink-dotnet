@@ -325,7 +325,8 @@ public sealed partial class CardApi
         IReadOnlyDictionary<string, object?>? seed = null,
         IReadOnlyList<object?>? eventArgs = null,
         CardInstance? eventSubject = null,
-        IReadOnlyDictionary<string, object?>? namedArgs = null)
+        IReadOnlyDictionary<string, object?>? namedArgs = null,
+        Func<CardInstance, IReadOnlyDictionary<string, object?>?>? seedFactory = null)
     {
         var results = new List<object?>();
         var library = Blueprint.KismetLibrary.Default;
@@ -383,7 +384,8 @@ public sealed partial class CardApi
             _triggerDepth++;
             try
             {
-                var bag = Vm.RunLocalProgramMulti(program, ctx, seed, outParamName);
+                var perCardSeed = seedFactory?.Invoke(card) ?? seed;
+                var bag = Vm.RunLocalProgramMulti(program, ctx, perCardSeed, outParamName);
                 results.Add(bag.GetValueOrDefault(outParamName));
             }
             finally
@@ -497,6 +499,98 @@ public sealed partial class CardApi
 
         return total;
     }
+
+    /// <summary>
+    /// 摧毁链的第二环：**「一个摧毁效果触发了」**（事件 24 <c>OnDestructionEffectTriggered</c>）。
+    ///
+    /// 出处 <c>out/bp-cardfn.json</c>：
+    /// <code>
+    /// TriggerDestruction（123 条语句）
+    ///   si=905  BooleanAND(Not(CustomName1HasAttribute("StopDestructionEffect")), card.hasDestruction)
+    ///   si=965  PopExecutionFlowIfNot(...)                       ; 假 ⇒ 整块跳过
+    ///   si=1237 localCardUsedForTriggeringDestructionEffect.OnDestroyed(NoObject{}, true)
+    ///   si=1286 ExecuteOnDestructionEffectTriggered(card, instigatorID,
+    ///               MakeArray(cardID), localDestructionEffectTriggerCards, false, out TriggerMultiple)
+    ///   si=1346 if (TriggerMultiple &gt; 0) { si=1390..1645
+    ///               loop Temp_int = 1..TriggerMultiple:
+    ///                   si=1515 ExecuteOnDestructionEffectTriggered(...) }   ; ★ 再整轮派发
+    ///
+    /// ExecuteOnDestructionEffectTriggered（27 条语句）
+    ///   si=74..171  loop over DestructionEffectTriggerCards（= FetchAllCardsWithEventTrigger(24)）
+    ///   si=276      localCardID_inLoop = item.cardID
+    ///   si=325/710  if (!skipSuppressCheck &amp;&amp; cardTriggered.isSuppressed) return
+    ///   si=398      contains = CardsToDestroy.Contains(localCardID_inLoop)
+    ///   si=458      item.OnDestructionEffectTriggered(cardTriggered, instigatorID, contains, out TriggerMultiple)
+    ///   si=530      localTriggerMultiple += TriggerMultiple
+    ///   si=604      out:TriggerMultiple = localTriggerMultiple
+    /// </code>
+    ///
+    /// 第 3 个入参（bool）在订阅者函数体里叫 <c>SelfAlsoDestroyed</c> —— 也就是
+    /// 「这张订阅卡自己是不是也在被摧毁的那批里」。调用点传的是
+    /// <c>MakeArray(被摧毁那张卡的 cardID)</c>，所以它 = 「订阅卡就是被摧毁的卡」。
+    /// 卡面互证（4 张订阅者全是这个语义）：
+    ///   · `card_unit_matsumoto_regiment`「Deal 1 damage to the enemy HQ when a **Destruction
+    ///     effect** triggers.」   —— `BooleanOR(SelfAlsoDestroyed, IsLocatedOnBoard(self))`
+    ///   · `card_unit_oita_regiment`「Gets +1+1 when a Destruction effect triggers.」—— 同上
+    ///   · `card_unit_114th_infantry_regiment`「When a **friendly** Destruction effect triggers,
+    ///     it triggers twice.」   —— `cardTriggered.side == side` ⇒ TriggerMultiple = 1
+    ///   · `card_event_japan_duty`「Give your units: "Destruction effects on this unit trigger
+    ///     an extra time."」      —— `HasCustomAbilityFromCard(能力名, cardTriggered, …)`
+    /// </summary>
+    /// <param name="card">触发摧毁效果的那张卡（`cardTriggered`）。</param>
+    /// <param name="instigator">摧毁者（`instigatorID` 的来源）。</param>
+    /// <returns>订阅者累加出来的 TriggerMultiple —— 调用方要再整轮派发这么多次。</returns>
+    public int FireDestructionEffectTriggered(CardInstance card, CardInstance? instigator)
+    {
+        // si=325/710：skipSuppressCheck=false 且 cardTriggered 被压制 ⇒ 整轮不派发。
+        if (card.Keywords.Contains(Keyword.Suppressed))
+        {
+            return 0;
+        }
+
+        var named = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["cardTriggered"] = card,
+            ["instigatorID"] = instigator?.CardId ?? 0,
+        };
+
+        var outs = BroadcastWithOutParam(
+            "OnDestructionEffectTriggered", card, card.Owner, "TriggerMultiple",
+            eventArgs: new object?[] { card, instigator?.CardId ?? 0, false },
+            eventSubject: card,
+            namedArgs: named,
+            seedFactory: observer => new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["cardTriggered"] = card,
+                ["instigatorID"] = instigator?.CardId ?? 0,
+                // si=398：CardsToDestroy 就是「被摧毁的那一张」，所以这个 bool 等价于
+                // 「订阅卡自己也在被摧毁的那批里」。
+                ["SelfAlsoDestroyed"] = observer.CardId == card.CardId,
+            });
+
+        int total = 0;
+        foreach (var v in outs)
+        {
+            total += AsInt(v);
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// 这张卡被摧毁时，它的**摧毁效果**该不该触发（事件 24 的门）。
+    ///
+    /// 出处 <c>TriggerDestruction</c> si=905/965：
+    /// <c>BooleanAND(Not(CustomName1HasAttribute("StopDestructionEffect")), card.hasDestruction)</c>；
+    /// 另有 si=1728 的一条并列分支 <c>HasCustomAbility("destruction")</c>（同一门的另一份实现）。
+    ///
+    /// ⚠️ **没做** <c>StopDestructionEffect</c> 那一半：它是 `CustomName1` 属性
+    /// （`si=3539 CustomName1Add("StopDestructionEffect")`），而 `CustomName1*` 三件套
+    /// 内核一个都没进派发表（审计 §6 的 P1#10，~60 张卡）。没有写方就没有读方的意义，
+    /// 这里不假装判过 —— 门只取剩下两条。
+    /// </summary>
+    public bool ShouldTriggerDestructionEffect(CardInstance card)
+        => card.Keywords.Contains(Keyword.Destruction) || HasCustomAbility(card, "destruction");
 
     /// <summary>诊断用：非 null 时记录每一次实际派发（`事件名 → 卡名#ID`）。</summary>
     public List<string>? TriggerTrace { get; set; }
