@@ -100,6 +100,25 @@ public sealed class MatchEngine
             ["MoveReason"] = "",
         };
 
+        // ---- 烟幕：移到**前线**就消失（P1，2026-09-30）----
+        //
+        // 出处 `out/bp-cardfn.json` → `CardLocationMoved`（61 条语句）：
+        // <code>
+        // si=638  PushExecutionFlow off=770
+        // si=643  EqualEqual_ByteByte(newLocation, 7)          ; 7 = 前线
+        // si=674  PopExecutionFlowIfNot(...)                    ; 不是 7 ⇒ 返回
+        // si=684  tmpCard.getHasSmokescreen(out doesIt)
+        // si=725  PopExecutionFlowIfNot(...)                    ; 没有烟幕 ⇒ 返回
+        // si=735  RemoveSmokescreen(cardID, cardID, true, false)
+        // </code>
+        // 放在这里而不是 `MoveUnit` 里：`CardLocationMoved` 是**所有**移位路径的
+        // 唯一入口（移动 / 生成落场 / 退却），蓝图也是在它里面判的。
+        if (newLocation == CardLocation.BoardFrontline
+            && card.Keywords.Contains(Keyword.Smokescreen))
+        {
+            Api.RemoveKeyword(card, Keyword.Smokescreen);
+        }
+
         Api.FireTrigger("OnCardLocationMoved", card, card.Owner, "OnOtherCardLocationMoved",
             eventArgs: new object?[] { card, (int)oldLocation, (int)newLocation, false, "" },
             eventSubject: card,
@@ -949,8 +968,40 @@ public sealed class MatchEngine
             return false;
         }
 
+        // 烟幕（`CanAttack` si=3596-3793，出处见 `LegalTargets` 里那段注释）。
+        // 蓝图里这一段的落点比掩护更靠后（si=3596 vs si=2627），所以放在射程之后、
+        // 与蓝图同序 —— 拒绝本身与顺序无关，但保持同序便于以后逐条对账。
+        if (defender.Keywords.Contains(Keyword.Smokescreen))
+        {
+            State.UnimplementedCalls[defender.IsHq
+                ? "<attack-on-location-with-smokescreen>"
+                : "<attack-on-smokescreen-target>"] =
+                State.UnimplementedCalls.GetValueOrDefault(defender.IsHq
+                    ? "<attack-on-location-with-smokescreen>"
+                    : "<attack-on-smokescreen-target>") + 1;
+            return false;
+        }
+
         State.AddKredits(attacker.Owner, -attacker.OperationCost);
         attacker.HasAttackedThisTurn = true;
+
+        // ---- 烟幕：**自己攻击之后消失** ----
+        //
+        // 出处 `out/bp-cardfn.json` → `AttackCard`（168 条语句）：
+        // <code>
+        // si=2911  _attackerCard.IsLocatedOnBoard(out isIt_2)
+        // si=2952  JumpIfNot 3640 if !isIt_2                 ; 攻击者不在场 ⇒ 跳过整段
+        // si=2966  JumpIfNot 3590 if _attackerCard.isSuppressed ; ★ 被压制 ⇒ 跳过
+        // si=3511  _attackerCard.cardFunction.RemoveSmokescreen(attackerCardID, attackerCardID, true, false)
+        // si=3590  _attackerCard.OnBeforeAttack(_defenderCard)
+        // </code>
+        // ⚠️ 两个门槛都要：**不在场** 和 **被压制** 都不移除。
+        //    时机在 `OnBeforeAttack` **之前**（si=3511 < si=3590）。
+        if (!attacker.Keywords.Contains(Keyword.Suppressed)
+            && attacker.Keywords.Contains(Keyword.Smokescreen))
+        {
+            Api.RemoveKeyword(attacker, Keyword.Smokescreen);
+        }
 
         RecordAction("XActionAttackCard", attacker.Owner, new Dictionary<string, object?>
         {
@@ -1076,6 +1127,21 @@ public sealed class MatchEngine
         {
             targets = targets.Where(t => !IsBeingGuarded(t)).ToList();
         }
+
+        // ---- 烟幕（Smokescreen）：带烟幕的单位**不能被攻击** ----
+        //
+        // 出处 `out/bp-cardscheck.json` → `cardsCheckFunctions::CanAttack`：
+        // <code>
+        // si=3596  defenderCard.getHasSmokescreen(out doesIt)
+        // si=3637  PopExecutionFlowIfNot(doesIt)                ; 没有烟幕 ⇒ 跳过
+        // si=3647  defenderCard.IsLocation(out isIt)
+        // si=3688  JumpIfNot(isIt) -> si=3782
+        // si=3702/3713  canAttack=False; failReason="location_has_smokescreen"
+        // si=3782/3793  canAttack=False; failReason="defender_has_smokescreen"
+        // </code>
+        // 卡面互证：`card_unit_85_pioneer_company` / `card_unit_coastwatchers` /
+        // `card_unit_royal_ulster_rifles` 等 54 张的「Smokescreen」文本。
+        targets = targets.Where(t => !t.Keywords.Contains(Keyword.Smokescreen)).ToList();
 
         // 末尾这条 `CanReachAcrossFrontline` 是射程判据（见 CanReachAcrossFrontline 的出处注释）。
         // ⚠️ 它现在对**所有**分支一致生效（包括原来那条 Guard 分支）——
