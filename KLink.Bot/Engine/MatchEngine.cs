@@ -1192,16 +1192,50 @@ public sealed class MatchEngine
     // ==================== 伤害与死亡 ====================
 
     /// <summary>造成伤害（由 <see cref="CardApi"/> 统一入口以保证事件顺序）。</summary>
-    internal void ApplyDamage(CardInstance target, int amount, CardInstance? source)
+    internal int ApplyDamage(CardInstance target, int amount, CardInstance? source,
+                             bool ignoreHeavyArmor = false)
     {
         if (amount <= 0 || !target.IsAlive)
         {
-            return;
+            return 0;
         }
 
         if (target.Keywords.Contains(Keyword.Immune))
         {
-            return;
+            return 0;
+        }
+
+        // ---- 重甲减伤（P1，2026-09-30）----
+        //
+        // 出处 `out/bp-cardfn.json` → `CalculateDamageDealt`（伤害结算的唯一出口）：
+        // <code>
+        // si=2936  _damageRecieverCard.getTotalHeavyArmor(out totalHeavyArmor)
+        // si=2977  SelectInt(0, totalHeavyArmor, ignoreHeavyArmor)
+        // si=3028  _damageRecieverCard.GetPassiveDefenseBuff(out amount)
+        // si=3082  SelectInt(GetPassiveDefenseBuff_amount, 0, applyBeforeAttackBuffs)
+        // si=3133  Add_IntInt(上面两个 SelectInt)
+        // si=3179  Subtract_IntInt(_dealerCalculatedDamage, 上面那个和)
+        // si=3225  Max(.., 0)
+        // </code>
+        // `SelectInt(A, B, pick)` 的语义是 `pick ? A : B`（`KismetVm.EvalMath` 的
+        // `case "SelectInt"`），所以
+        //     damage = Max(damage − (ignoreHeavyArmor ? 0 : 重甲) − (applyBeforeAttackBuffs ? 被动防buff : 0), 0)
+        //
+        // ⚠️ 只落地**重甲**那一半。`GetPassiveDefenseBuff` 是另一条机制
+        //    （被动防御 buff），内核里没有对应实现，不拿近似值顶替。
+        //
+        // ⚠️ `ignoreHeavyArmor` 在蓝图里是 `CalculateDamageDealt` 的入参；
+        //    内核没有 `CalculateDamageDealt` 这一层，所以做成 `ApplyDamage` 的可选入参。
+        //    目前**没有任何调用点传 true** —— 因为「谁能无视重甲」这条还没有证据，
+        //    先只做「默认减伤」这一半（52 张卡的减伤从完全无效变成生效）。
+        int reduction = ignoreHeavyArmor ? 0 : target.HeavyArmor;
+        if (reduction > 0)
+        {
+            amount = Math.Max(amount - reduction, 0);
+            if (amount == 0)
+            {
+                return 0;
+            }
         }
 
         target.Defense -= amount;
@@ -1213,6 +1247,8 @@ public sealed class MatchEngine
                 State.Finish(target.Owner.Opposite(), "Victory_DestroyHQ");
             }
         }
+
+        return amount;
     }
 
     /// <summary>直接对 HQ 造成伤害（疲劳等无来源伤害）。</summary>
