@@ -835,8 +835,39 @@ public sealed class MatchEngine
             return false;
         }
 
-        if (attacker.Keywords.Contains(Keyword.Pinned) || attacker.Keywords.Contains(Keyword.Suppressed))
+        // ⚠️ 这里**不再**因为 `attacker` 被压制就禁止攻击。
+        //
+        // 蓝图里"压制"的语义是**不触发伤害修正**，不是"不能行动"：
+        // `cardsCheckFunctions::CanAttack`（210 条语句）里 **`isSuppressed` 出现 0 次**
+        // （`out/audit/p0-guard-buff-evidence.py`；dump = `out/bp-cardscheck.json`）；
+        // 它只出现在伤害链路的分流上：
+        //   `ExecuteBeforeReceiveDamage`  si=38  `JumpIfNot(card.isSuppressed)` → 跳过修正
+        //   `ExecuteOnDealDamageAddDamage` si=5  同上
+        //   `ExecuteOnSurvivedCombatEvents` si=38 / `MakeVeteran` si=2427 也是同一种"压制就不广播"
+        // 旧实现把"被压制 ⇒ 禁攻击"当成规则，会把被压制的单位整个冻住（比蓝图严格得多）。
+        // `Pinned`（i=1839 `attacker.IsPinned() && !HasCustomAbility("canOperateWhilePinned")`）
+        // 是真的禁止攻击，保留。
+        if (attacker.Keywords.Contains(Keyword.Pinned))
         {
+            return false;
+        }
+
+        // 掩护（`isBeingGuarded`）—— 出处 `cardsCheckFunctions::CanAttack`：
+        // <code>
+        // si=2492 IsBomber(attackerCard)   si=2533 IsArtillery(attackerCard)
+        // si=2574 or = IsBomber || IsArtillery
+        // si=2612 JumpIfNot(or) -> si=2627      ; 为假（不是轰炸/火炮）⇒ 落下去查掩护
+        // si=2626     PopExecutionFlow           ; 是轰炸/火炮 ⇒ 跳过整个掩护判定
+        // si=2627 PopExecutionFlowIfNot(defenderCard.isBeingGuarded)   ; 没被掩护 ⇒ 跳过
+        // si=2659 IsLocation(defenderCard)
+        // si=2700 JumpIfNot(IsLocation) -> si=2788
+        // si=2714     canAttack=False; failReason="hq_is_being_garded"; return
+        // si=2788     canAttack=False; failReason="is_being_guarded";   return
+        // </code>
+        if (!IsBomber(attacker) && !Api.IsArtillery(attacker) && IsBeingGuarded(defender))
+        {
+            State.UnimplementedCalls["<attack-on-guarded-target>"] =
+                State.UnimplementedCalls.GetValueOrDefault("<attack-on-guarded-target>") + 1;
             return false;
         }
 
@@ -941,32 +972,94 @@ public sealed class MatchEngine
         var enemy = attacker.Owner.Opposite();
         var enemyUnits = State.Board(enemy).Where(u => u.IsAlive).ToList();
 
-        // Guard 单位必须优先被攻击
-        var guards = enemyUnits.Where(u => u.Keywords.Contains(Keyword.Guard)).ToList();
-        if (guards.Count > 0)
-        {
-            return guards.Where(t => CanReachAcrossFrontline(attacker, t));
-        }
-
-        // 前线有敌方单位时不能越过打后方（简化模型，TODO 待回放确认）。
-        //
-        // ⚠️ 判据是**位置**（`CardLocation.BoardFrontline`），不是 `LocationNumber == 0`。
-        //    以前所有单位都被 `PlaceOnBoard` 塞进前线、用槽位 0 表示"在前线"，
-        //    所以拿槽位当判据。现在单位默认落在**半场**、上前线是主动动作，
-        //    位置本身就区分得开，再按槽位判会把半场里第 0 格那张误判成前线。
+        // 前线有敌方单位时不能越过打后方（本内核的**简化模型**，TODO 待回放确认；
+        // 蓝图 `CanAttack` 里对应的规则是射程判据，见 CanReachAcrossFrontline）。
         var enemyFrontline = enemyUnits
             .Where(u => u.Location == CardLocation.BoardFrontline).ToList();
-        if (enemyFrontline.Count > 0)
+
+        List<CardInstance> targets = enemyFrontline.Count > 0
+            ? new List<CardInstance>(enemyFrontline)
+            : new List<CardInstance>(enemyUnits) { State.Hq(enemy) };
+
+        // ---- 掩护（Guard）----
+        //
+        // ⚠️ 旧实现把 Guard 做成了**嘲讽**（"有 Guard 就必须先打它、HQ 直接不可选"），
+        //    而蓝图 `BP_CardFunctions::UpdateGuarded`（62 条语句，`out/bp-cardfn.json`）的语义是
+        //    「**邻卡有 Guard ⇒ 这张卡被掩护**」：
+        // <code>
+        // si=5/36/67/174   location ∈ {5,6,7} 之外直接返回（只对棋盘上的卡算）
+        // si=188           FetchCardsByLocation(location) —— 遍历**同一条线**上的卡
+        // si=523/634       getHasGuard(_currentCard) && !IsUnrevealedCovertCard(_currentCard)
+        // si=672           JumpIfNot(那个条件) -> si=836
+        // si=686/718       有 Guard 的卡：isBeingGuarded = False     ← ★ 掩护卡自己不免疫
+        // si=836/847       _removeGuarded = True; GetAdjacentCards(_currentCard, true, out 邻卡)
+        // si=1276/1336     邻卡 hasGuard && !IsUnrevealedCovertCard ⇒ 成立
+        // si=1346/1405     _currentCard.isBeingGuarded = True        ← ★ 邻卡有 Guard ⇒ 被掩护
+        // si=1517/1587     _removeGuarded && isBeingGuarded ⇒ 置回 False（清掉过期标记）
+        // </code>
+        //    再配合 `CanAttack` si=2627 的拒绝（上面 Attack 里的注释），三条结论：
+        //      · 孤立单位**可以**被打（没有 Guard 邻卡）
+        //      · 掩护卡**自己可以**被打（它的 isBeingGuarded 恒 False）
+        //      · HQ 只在**被邻卡掩护**时不可打（HQ 也在 5/6 这条线上，占第 0 格）
+        //    轰炸机/炮兵跳过整条判定（si=2492-2626）。旧实现这三条全反 —— 128 张天生
+        //    Guard + `GiveGuard` 的子集，目标集两个方向都错。
+        if (!IsBomber(attacker) && !Api.IsArtillery(attacker))
         {
-            return enemyFrontline.Where(t => CanReachAcrossFrontline(attacker, t));
+            targets = targets.Where(t => !IsBeingGuarded(t)).ToList();
         }
 
-        // ⚠️ 末尾这条 `CanReachAcrossFrontline` 是本次新增的**唯一**过滤：
-        //    原来这里无条件返回「全部敌方单位 + 敌方 HQ」，于是半场的步兵
-        //    （range=1）能隔着前线直接打对方 HQ —— 就是 abcA-aggro.log 里
-        //    `card_unit_30_infantry_regiment@BoardHqLeft#3 → right HQ` 那种。
-        var result = new List<CardInstance>(enemyUnits) { State.Hq(enemy) };
-        return result.Where(t => CanReachAcrossFrontline(attacker, t));
+        // 末尾这条 `CanReachAcrossFrontline` 是射程判据（见 CanReachAcrossFrontline 的出处注释）。
+        // ⚠️ 它现在对**所有**分支一致生效（包括原来那条 Guard 分支）——
+        //    旧实现里 Guard 分支也套了它，但那是因为分支结构不同；
+        //    统一过滤后语义不变：够不着的目标就是不能打（蓝图 si=90-99）。
+        return targets.Where(t => CanReachAcrossFrontline(attacker, t));
+    }
+
+    /// <summary>轰炸机（`IsBomber`，`CanAttack` si=2492 用它跳过掩护判定）。</summary>
+    public static bool IsBomber(CardInstance card) => card.Definition.Type == "bomber";
+
+    /// <summary>
+    /// 「这张卡被掩护了吗」—— 逐字对应 `BP_CardFunctions::UpdateGuarded`
+    /// （62 条语句，出处见 <see cref="LegalTargets"/> 里的逐语句引用）。
+    ///
+    /// 判据：
+    /// 1. 只对棋盘上的卡（location ∈ {5,6,7}）成立；
+    /// 2. **自己有 Guard ⇒ 恒 false**（掩护卡自己不免疫，si=686/718）；
+    /// 3. 否则 ⟺ **同一条线上 locationNumber ± 1 的邻卡有 Guard**（si=847/1276/1405）。
+    ///
+    /// ⚠️ 蓝图里还有一条 `!IsUnrevealedCovertCard` 的过滤（si=564/1206）——
+    /// 本内核没有建模 Covert（P1），所有卡都不是"未揭示的隐蔽卡"，
+    /// 所以这个条件恒真、不改变结果。**这是已知的近似，不是遗漏。**
+    /// </summary>
+    public bool IsBeingGuarded(CardInstance card)
+    {
+        if (!card.Location.IsBoard())
+        {
+            return false;   // si=174：location ∉ {5,6,7} 直接返回
+        }
+
+        if (card.Keywords.Contains(Keyword.Guard))
+        {
+            return false;   // si=686/718：掩护卡自己不被掩护
+        }
+
+        // 同一条线上的邻卡（locationNumber ± 1）—— GetAdjacentCards 的语义。
+        // 只看**同阵营**的卡：掩护是给自己人挡的。
+        foreach (var other in State.Cards(card.Owner, card.Location))
+        {
+            if (ReferenceEquals(other, card))
+            {
+                continue;
+            }
+
+            if (Math.Abs(other.LocationNumber - card.LocationNumber) == 1
+                && other.Keywords.Contains(Keyword.Guard))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

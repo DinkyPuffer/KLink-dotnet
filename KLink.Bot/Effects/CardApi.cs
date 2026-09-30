@@ -522,6 +522,35 @@ public sealed partial class CardApi
         }
     }
 
+    /// <summary>
+    /// 「这张卡能被加 buff 吗」—— 逐字对应 `BP_CardFunctions::CanCardBeBuffed`
+    /// （`out/bp-cardfn.json`，30 条语句）：
+    /// <code>
+    /// si=41   JumpIfNot(IsUnrevealedCovertCard(Card)) -> si=730   ; 未揭示的隐蔽卡 ⇒ 可以直接 buff
+    /// si=55..711  switch(Card.location)：
+    ///             0(NotAvailable)                      → si=746  False
+    ///             1/2(牌库) 3/4(手牌)                  → si=762  True
+    ///             5/6(半场/HQ) 7(前线) 8(弃牌堆)        → si=746  False
+    ///             9(牌库)                              → si=762  True
+    /// </code>
+    /// 调用点（同一份 dump，`CanCardBeBuffed` 出现在这些函数的守位）：
+    /// `ChangeAttack` si=71/103、`ChangeDefense` si=48/80、`ChangeKreditCost` si=385/417、
+    /// `CustomAbilityAdd` si=99/131，以及 `GiveGuard`/`GiveAlpine`/`GiveAmbush`/`GiveBlitz`/
+    /// `GiveBond`/`GiveFury`/`GiveShock`/`GiveSmokescreen` 一族各 si=94/126。
+    /// 语义：**buff 只能加在牌库/手牌里的卡上**；已经在场(5/6/7)或进了弃牌堆(8)的卡不再接受 buff
+    /// （那些卡的数值改动由别的路径负责，例如 `SetValue` 的绝对值设置与战斗结算）。
+    ///
+    /// ⚠️ 本内核**没有建模 Covert**（P1），所以 `IsUnrevealedCovertCard` 恒假 ——
+    /// 也就是说这里不会出现"隐蔽卡例外"。这是已知近似。
+    /// </summary>
+    public static bool CanCardBeBuffed(CardInstance card) => card.Location switch
+    {
+        CardLocation.DeckLeft or CardLocation.DeckRight => true,   // 1 / 2
+        CardLocation.HandLeft or CardLocation.HandRight => true,   // 3 / 4
+        CardLocation.Deck => true,                                 // 9
+        _ => false,                                                // 0 / 5 / 6 / 7 / 8
+    };
+
     public void ChangeAttack(CardInstance target, int delta, CardInstance? source, int duration = -1)
     {
         if (!target.IsAlive || delta == 0)

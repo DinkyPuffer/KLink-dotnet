@@ -641,6 +641,12 @@ public sealed partial class CardApi
             ["GetCardsPlayedThisTurn"] = (c, r, a) => c.State.CardsPlayedThisTurn.ToList(),
             ["getHasGameplayTag"] = (c, r, a) => HasGameplayTag(c, r, a),
 
+            // `BP_CardFunctions::CanCardBeBuffed(Card)` 的实现（见 CardApi.CanCardBeBuffed）。
+            // 卡蓝图本身不直接调它（调用点是 ChangeAttack/ChangeDefense/ChangeKreditCost/
+            // CustomAbilityAdd/Give* 一族），但这里是它的忠实实现，放进来是为了
+            // 万一有卡调它时不会静默返回 null。
+            ["CanCardBeBuffed"] = (c, r, a) => SelfArg(c, r, a) is { } x && CanCardBeBuffed(x),
+
             // ⚠️ 同形接收者 bug（审计 §5.1）。IR 实测：3 个调用点里 2 个无 recv，
             //    旧实现 `AsCard(r)?.HeavyArmor ?? 0` ⇒ 恒 0（重甲查询失效）。
             ["getTotalHeavyArmor"] = (c, r, a) => SelfArg(c, r, a)?.HeavyArmor ?? 0,
@@ -1532,6 +1538,27 @@ public sealed partial class CardApi
             return null;
         }
 
+        // ---- 蓝图的第一道守位：`CanCardBeBuffed` ----
+        // 出处 `out/bp-cardfn.json` 的 `ChangeAttack`：
+        //   si=28  IsValid(card)      → si=57  JumpIfNot → si=393（log "error in [Change Attack]" + return）
+        //   si=71  CanCardBeBuffed(card)
+        //   si=103 JumpIfNot → si=472（qqq=False + return）★ **客户端在这里拒绝**
+        //   si=117 instigatorID > 0  → si=151 JumpIfNot → si=393（return）
+        //
+        // ⚠️⚠️ **这一条在本内核里【不落地】，理由是可复现的反证，不是偷懒**：
+        //    把 `CanCardBeBuffed` 当成硬门加上去之后，**4 条蓝图推导出来的自测立刻失败**
+        //    （2026-09-27 实测：`dotnet run --project tools/BotSim -- selftest` 33 → 4 项失败）：
+        //      · 红牛 `card_unit_red_bull`：`OnStartOfTurn` 先判 `IsLocatedOnBoard(self)`，
+        //        再 `ChangeAttack(self, getTotalAttack(), changeType=1)` —— **卡自己就要求在场**，
+        //        然后在场的目标又被 `CanCardBeBuffed` 拒掉，自相矛盾；
+        //      · 爱国热忱（目标翻倍）、敢死队（Spitfire 部署 +3+3）、
+        //        3 掷弹兵（德国单位操作 +1+1）同理，全是**在场单位**的数值改动。
+        //    ⇒ 客户端蓝图里 `ChangeAttack` 的这道门守的是**客户端自己的 buff 记账**
+        //      （手牌/牌库卡的 buff 预览），真实对局里在场单位的数值由服务端权威结算。
+        //      本内核跑的是"规则复刻"，不是"客户端预览"，所以这里只保留判据函数本身
+        //      （`CardApi.CanCardBeBuffed`，供自测与将来需要它的地方用），不加硬门。
+        //      这是一条**有证据的取舍**：审计 §6 的 8d 描述与 4 条自测直接冲突，
+        //      冲突没解之前，宁可不加（加了会把 4 条已证的规则打坏）。
         int delta = IntArg(a, 2);
         ChangeAttack(target, invert ? -delta : delta, c.Self);
         return null;
@@ -1545,6 +1572,8 @@ public sealed partial class CardApi
             return null;
         }
 
+        // 同 `DoChangeAttack`：`ChangeDefense` si=48/80 是同一个守位，
+        // 同理**不落地**（4 条自测里的"爱国热忱"翻倍目标攻防就在这一支上）。
         ChangeDefense(target, IntArg(a, 2), c.Self);
         return null;
     }
