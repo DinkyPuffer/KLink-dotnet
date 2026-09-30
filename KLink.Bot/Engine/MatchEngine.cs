@@ -633,6 +633,21 @@ public sealed class MatchEngine
         // （就是它们还原 buff / 给部署单位加成的那一支）从来没执行过。
         Api.FireTrigger("OnOtherCardPlayedFromHand", card, card.Owner, eventArgs: new object?[] { card });
 
+        // ---- ⑥ 山地加成（`GiveAlpineBonus`）----
+        //
+        // 出处 `out/bp-cardfn.json` → `PlayCardFromHand`（105 条语句）：
+        // <code>
+        // si=2114  CardPlayedFromHand(tmpCardToPlay, targetCardID)   ; 上面 ①..⑤ 全在这里面
+        // si=2147  GameStateRef.GetExecuteWaitPlayFromHand(out ShouldExecuteWait)
+        // si=2192  JumpIfNot(ShouldExecuteWait) -> si=2207
+        // si=2207      GiveAlpineBonus(tmpCardToPlay)
+        // </code>
+        // ⇒ ①「**没走 wait 路径**才在这里给」，走 wait 路径的由
+        //    `AfterWaitCardPlayFromHand` si=974 自己给（两条互斥，不会双给）；
+        //    ② 时机是 **`CardPlayedFromHand` 整条跑完之后**，所以放在这里而不是 `PlaceOnBoard` 里。
+        // ⚠️ 加成是**加法**（`changeType=1`），一个单位只能给一次 —— 见 `GiveAlpineBonus` 的注释。
+        Api.GiveAlpineBonus(card);
+
         CheckDeaths();
         return true;
     }
