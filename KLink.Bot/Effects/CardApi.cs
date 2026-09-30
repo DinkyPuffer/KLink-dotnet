@@ -978,13 +978,22 @@ public sealed partial class CardApi
                                                   isCombatDamage, fromFight, counterDamage);
         }
 
-        _engine.ApplyDamage(target, amount, source);
+        int applied = _engine.ApplyDamage(target, amount, source);
 
+        // ⚠️ 2026-09-30：`damage` 填的是**修正后**的值、`oldDefense` 填的是**结算前**的防御。
+        //    证据（`out/bp-cardfn.json` → `ApplyDamageToCard`，123 条语句）：
+        //      si=62   oldDefense = card.getTotalDefense()        ; 扣血**之前**取
+        //      si=1431 NotifyDamageCard(toCardID, finalDamage, damageDealerID, _isDestroyed,
+        //                               oldLocation, oldDefense, isRedirected, isFightDefenderDamage)
+        //    两个字段在 si=1431 的实参名就是 `finalDamage`（= `ExecuteOnDealDamageAddDamageAfterCalc`
+        //    的出参）与 `oldDefense`。旧实现两个都填**请求值**（P1 重甲那轮记的「没证据」现在有证据了）。
+        //    `target.Defense + applied` 而不是 `+ amount`：重甲减伤之后 `applied < amount`，
+        //    用 amount 会把 oldDefense 算高（那是重甲那轮留下的偏差，这里一并修正）。
         _engine.FireSubAction("ZActionDamageCard", new[]
         {
             ActionValue2.Int("cardID", target.CardId),
             ActionValue2.Int("damage", amount),
-            ActionValue2.Int("oldDefense", target.Defense + amount),
+            ActionValue2.Int("oldDefense", target.Defense + applied),
             ActionValue2.Bool("destroyed", target.Defense <= 0),
             ActionValue2.Int("attackerCardID", source?.CardId ?? 0),
         });
