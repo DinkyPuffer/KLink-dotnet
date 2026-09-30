@@ -439,6 +439,55 @@ public sealed class KismetVm
 
         var result = _api.InvokeByName(fn, receiver, args, ctx, out bool handled);
 
+        // ---- ★ 卡自己的局部函数（P0 第 3 族，2026-09-27）----
+        //
+        // 蓝图里的「卡内私有函数」（`ApplyBuff` / `RemoveBuff` / `didPlayBritishInfantryLastTurn` /
+        // `hasGuardAdjacentUnit` / `Random Card` …）编译成**独立 export**、不在 ubergraph 里，
+        // 所以它们既不是引擎原语、也没有 C# 替身 —— 旧实现只会记一笔 Unimplemented、
+        // **等于什么都不做**（审计 §5.7：67 个名字属于这一类，覆盖 ~70 张卡）。
+        // 现在 IR 带了这些函数体（`locals`；生成器 `LOCAL_FUNCTIONS` 2 → 78 个：
+        // 见 `klink bot/tools/gen-kismet-ir.py` 与清单 `out/audit/private-fns-cards-only.txt`），
+        // 于是这里补一条兜底：**派发表认不出来 ⇒ 看这张卡自己有没有同名函数体**。
+        //
+        // ⚠️ 三条必须写清楚的取舍：
+        // 1. **派发表优先**，不是 locals 优先。派发表里有 9 个同名手写 C# 替身
+        //    （`ApplyTheBuff`/`RemoveTheBuff`/`updateCustomJsonIfNeeded`/`anyOrderPlayedThisTurn`/
+        //    `checkAndUpdateBuffOnCard`/`checkAndUpdateBuffOnAllCards`/`getTwoCardsFromPossibleCards`/
+        //    `getPossibleCardsFromStaticCards`/`_isBigRedOne`），它们有自测守着（四条光环自测）。
+        //    locals 优先会把它们换掉 —— 那要单独验证，本轮不做。
+        // 2. **出参名从调用点的 out 槽名反推**：蓝图里 out 槽叫 `CallFunc_<函数名>_<出参名>`
+        //    （实测 `CallFunc_HasCustomAbilityFromCard_doesIt` → `doesIt`），
+        //    于是把函数名前缀剥掉就是函数体里那个变量名。剥不出来就只跑副作用。
+        // 3. **入参不 seed**：dump 里**没有参数名**（`cards.full.json` 的函数项只有
+        //    `expr_count` + `bytecode`）。所以函数体只能靠帧默认值（`cardFunction` = `ctx.Self`、
+        //    `side`、`cardID`、实例变量）工作 —— 这正好覆盖这一族的主流形态
+        //    （实测 `ApplyBuff` 体读的是 `_tmp_card`(自身局部) / `side` / `cardFunction`；
+        //     `didPlayBritishInfantryLastTurn` 读 `side` / `cardFunction`）。
+        //    **需要真入参的私有函数会拿到 null**，这一点用 `<local-ran:名字>` 计数器留痕，
+        //    不假装它对 —— 要是回归数字恶化，就把这条兜底关掉。
+        if (!handled && LocalProgramFor(ctx, fn) is { } local)
+        {
+            var outNames = new List<string>();
+            foreach (int p in step.OutParams)
+            {
+                if (p < step.Args.Count && step.Args[p].Var is { } slot)
+                {
+                    outNames.Add(slot);
+                    string prefix = "CallFunc_" + fn + "_";
+                    outNames.Add(slot.StartsWith(prefix, StringComparison.Ordinal)
+                        ? slot[prefix.Length..]
+                        : slot);
+                }
+            }
+
+            var bag = outNames.Count > 0
+                ? RunLocalProgramMulti(local, ctx, null, outNames.ToArray())
+                : RunLocalProgramMulti(local, ctx, null);
+            result = outNames.Count > 0 ? bag[outNames[0]] : null;
+            handled = true;
+            _api.NotifyUnimplemented($"<local-ran:{fn}>");
+        }
+
         if (!handled)
         {
             UnimplementedCalls[fn] = UnimplementedCalls.GetValueOrDefault(fn) + 1;
@@ -799,6 +848,23 @@ public sealed class KismetVm
         CardInstance => true,
         _ => true,
     };
+
+    /// <summary>
+    /// 当前正在跑的那张卡有没有叫这个名字的**卡内私有函数**（IR 的 `locals`）。
+    ///
+    /// 只在派发表认不出来时用（见 <c>ExecuteCall</c> 里的兜底那一段）。
+    /// 主体取 <see cref="EffectContext.Self"/> —— 蓝图里 `LocalVirtualFunction` 的
+    /// `cardFunction` 就是它。
+    /// </summary>
+    private static KismetProgram? LocalProgramFor(EffectContext ctx, string functionName)
+    {
+        if (ctx.Self is not { } self || functionName.Length == 0)
+        {
+            return null;
+        }
+
+        return KismetLibrary.Default?.FindLocalProgram(self.Definition.Name, functionName);
+    }
 
     // ==================== 变量帧 ====================
 
