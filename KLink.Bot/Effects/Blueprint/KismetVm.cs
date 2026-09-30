@@ -808,15 +808,30 @@ public sealed class KismetVm
             "kredits" => card.KreditCost,
             "operationCost" => card.OperationCost,
             "isGoldCard" => card.IsGold,
-            // ⚠️ 这里**不列** `hasCovert` / `covert`：本内核的 `Keyword` 里没有 Covert
-            //    （关键字集只覆盖了 CDO 的 has* 字段里已建模的那些）。
-            //    宁可不认（返回 null → 判据为假），也不要拿一个近似的关键字顶替。
+            // ⚠️ 2026-09-30（P1）：这张表**必须和 `CardApiDispatch` 的 `getHas*` 一族同步**。
+            //    同一个判据在 IR 里有两种形状 —— 成员读（`card.hasDeployment`）和
+            //    函数调用（`call fn=getHasDeployment`）。只补一边，另一半照样静默取假。
+            //
+            //    旧表只覆盖 7 个，漏掉的成员读（审计 §4.1 第 1 条）：
+            //    `hasCovert`(10 点) / `hasDestruction`(4) / `hasAlpine`(2) /
+            //    `hasMobilize`(2) / `hasDeployment`(1) —— 全部读成 null → 判假。
+            //    `hasCovert` 以前是**显式不认**（"本内核的 Keyword 里没有 Covert"），
+            //    现在 `Keyword.Covert` 有了（CDO 字段 11 张），所以照常认。
             "hasGuard" => card.Keywords.Contains(Keyword.Guard),
             "hasBlitz" => card.Keywords.Contains(Keyword.Blitz),
             "hasAmbush" => card.Keywords.Contains(Keyword.Ambush),
             "hasFury" => card.Keywords.Contains(Keyword.Fury),
             "hasSmokescreen" => card.Keywords.Contains(Keyword.Smokescreen),
             "hasHeavyArmor" => card.Keywords.Contains(Keyword.HeavyArmor),
+            "hasAlpine" => card.Keywords.Contains(Keyword.Alpine),
+            "hasShock" => card.Keywords.Contains(Keyword.Shock),
+            "hasMobilize" => card.Keywords.Contains(Keyword.Mobilize),
+            "hasSalvage" => card.Keywords.Contains(Keyword.Salvage),
+            "hasPincer" => card.Keywords.Contains(Keyword.Pincer),
+            "hasDeployment" => card.Keywords.Contains(Keyword.Deployment),
+            "hasDestruction" => card.Keywords.Contains(Keyword.Destruction),
+            "hasCovert" => card.Keywords.Contains(Keyword.Covert),
+            "hasScrying" => card.Keywords.Contains(Keyword.Scrying),
             "pinned" => card.Keywords.Contains(Keyword.Pinned),
 
             // ---- 「值就是自己的名字」的实例变量（JSON 键名）----

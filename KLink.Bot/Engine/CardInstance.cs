@@ -345,4 +345,19 @@ public static class Keyword
     public const string Veteran = "Veteran";
     public const string Suppressed = "Suppressed";
     public const string Pinned = "Pinned";
+
+    // ---- P1 新增（2026-09-30）----
+    //
+    // 下面 5 个是 CDO 里**本来就有**的 `has*` 字段，只是内核的 `Keyword` 集合一直没收录
+    // （`gen-card-keywords.py` 的 `BOOL_FLAGS` 里注释写着"硬映射会编译不过，也不该为了
+    // 这一步去扩关键字集"）。后果是 IR 里以**成员读**出现的 `hasDeployment` /
+    // `hasDestruction` / `hasCovert` / `hasPincer` 全部读成 null → 判假（审计 §4.1 第 1 条）。
+    //
+    // 卡数（`out/cards-full2.json` 的 CDO）：hasDeployment 249 / hasDestruction 73 /
+    // hasCovert 11 / hasPincer 15 / hasScrying 1。出现时**恒为 True**，缺席即默认 false。
+    public const string Deployment = "Deployment";
+    public const string Destruction = "Destruction";
+    public const string Covert = "Covert";
+    public const string Pincer = "Pincer";
+    public const string Scrying = "Scrying";
 }

@@ -650,7 +650,53 @@ public sealed partial class CardApi
             // ⚠️ 同形接收者 bug（审计 §5.1）。IR 实测：3 个调用点里 2 个无 recv，
             //    旧实现 `AsCard(r)?.HeavyArmor ?? 0` ⇒ 恒 0（重甲查询失效）。
             ["getTotalHeavyArmor"] = (c, r, a) => SelfArg(c, r, a)?.HeavyArmor ?? 0,
+
+            // ---- P1（2026-09-30）：`getHas*` 一族 ----------------------------------
+            //
+            // 出处：审计 §6 的 P1#27f ——「派发表里**没有任何 `getHas*` 键**」。
+            // 卡蓝图里这些判据的形状是「如果这张卡有 X 就…」，读不到就**静默取假**，
+            // 于是那些分支的方向是反的（该走的没走、不该走的走了）。
+            //
+            // IR 实测调用点（`klink bot/docs/card-ir.json`，脚本
+            // `out/audit/p1-gethas-calls.py`）：
+            //     getHasBlitz 9 点 / getHasAlpine 9 / getHasShock 7 / getHasGuard 5 /
+            //     getHasAmbush 2 / getHasFury 1 / getHasSmokescreen 1
+            //
+            // 语义：和 `KismetVm.GetMember` 的成员读**完全同源**（都读 `Keyword` 集合），
+            // 所以两处必须同步 —— 成员读走 `hasXxx`，函数调用走 `getHasXxx`。
+            //
+            // ⚠️ 接收者一律用 `SelfArg`（`c.Self ?? c.Target`），不用 `AsCard(r)`：
+            //    这一族大量以**隐式 self** 出现（没有 recv），`AsCard(r)` 会恒 null。
+            //    同族的前科见审计 §5.1 的 `IsVeteran` / `IsDamaged`。
+            ["getHasBlitz"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Blitz),
+            ["getHasGuard"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Guard),
+            ["getHasAmbush"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Ambush),
+            ["getHasFury"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Fury),
+            ["getHasSmokescreen"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Smokescreen),
+            ["getHasAlpine"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Alpine),
+            ["getHasShock"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Shock),
+            ["getHasMobilize"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Mobilize),
+            ["getHasSalvage"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Salvage),
+            ["getHasPincer"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Pincer),
+            ["getHasDeployment"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Deployment),
+            ["getHasDestruction"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Destruction),
+            ["getHasCovert"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Covert),
+            ["getHasScrying"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Scrying),
+            // `getHasImmune` 读的是**运行时**授予的免疫（`cardsGivingImmunity` / `isImmune`），
+            // 不是 CDO 字段（CDO 里 `isImmune` 出现 0 次）。内核把免疫建模成
+            // `Keyword.Immune`（`MatchEngine.ApplyDamage` 就读它），所以这里读同一个集合 ——
+            // 语义一致，不是拿近似值顶替。
+            ["getHasImmune"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Immune),
         };
+
+    /// <summary>
+    /// `getHasXxx()` 一族：这张卡现在有没有关键字 <paramref name="keyword"/>。
+    ///
+    /// 接收者用 <see cref="SelfArg"/>（隐式 self 兜底 `c.Self ?? c.Target`）。
+    /// 卡拿不到（IR 参数位错等）时返回 false —— 和旧行为一致，不会凭空为真。
+    /// </summary>
+    private static bool HasKeyword(EffectContext c, object? receiver, object?[] args, string keyword)
+        => SelfArg(c, receiver, args)?.Keywords.Contains(keyword) ?? false;
 
     /// <summary>
     /// 「从牌库里挑一张」—— 按反编译蓝图实现（<c>BP_CardFunctions.selectCardToDraw</c>）。
