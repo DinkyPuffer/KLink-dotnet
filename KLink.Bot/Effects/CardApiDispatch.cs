@@ -1866,10 +1866,26 @@ public sealed partial class CardApi
             return null;
         }
 
-        // DamageCard(target, 伤害, attackerID, bool, bool, bool, out)
+        // DamageCard(card, amount, damagerCardID, isRedirected, fromFight, isFightDefenderDamage, out targetDestroyed)
+        // 参数名/顺序出处：资产里 `FunctionExport.LoadedProperties` 的 `CPF_Parm` 声明序
+        // （`ref/kards-sim/KardsTranspiler/BlueprintSignatures.cs` 的取法），
+        // 调用点互证 `out/bp-cardfn.json` → `DamageCard` si=690。
+        //
+        // ⚠️ 第 3 参在蓝图里是 **cardID（int）**，不是卡对象；内核以前只认对象
+        //    （`AsCard` 拿到 null ⇒ 退回 `c.Self`）。对绝大多数调用点等价
+        //    （全卡池 15 处 `DamageCard` 里 11 处传的就是自己的 `cardID`），
+        //    但 `OnOtherCardDealDamageAddDamageAfterCalc` 那 4 处传的是
+        //    `cardDealingDamage.cardID`（**原始伤害来源**）—— 那条链内核还没做，
+        //    这里如实保留旧行为，不猜一个来源出来。
         int amount = IntArg(a, 1);
         var source = AsCard(a.ElementAtOrDefault(2)) ?? c.Self;
-        DealDamage(target, amount, source);
+
+        // si=149 `JumpIfNot(isRedirected) -> si=690`：重定向伤害**跳过**修正链。
+        // si=690 `ExecuteOnDealDamageAddDamage(damageDealer, card, amount, False, fromFight, False, …)`
+        bool isRedirected = a.Length > 3 && Blueprint.KismetVm.Truthy(a[3]);
+        bool fromFight = a.Length > 4 && Blueprint.KismetVm.Truthy(a[4]);
+
+        DealDamage(target, amount, source, isRedirected: isRedirected, fromFight: fromFight);
         return null;
     }
 

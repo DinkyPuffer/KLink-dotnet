@@ -1034,10 +1034,17 @@ public sealed class MatchEngine
             + $"  目标剩 {defender.Defense - attackerDamage}"
             + (defenderDamage > 0 && !defender.IsHq ? $"  反击 {defenderDamage}" : ""));
 
-        Api.DealDamage(defender, attackerDamage, attacker);
+        // ⚠️ `isCombatDamage: true` / `counterDamage` 以前**没有传**，两个都恒为 false。
+        //    蓝图 `ExecuteAttackCard` 的两处 `ExecuteOnCardDealDamageEffects` 是
+        //    si=3363 `(defender, attacker, finalDamageToDefender, True, False, False)`
+        //    si=3451 `(attacker, defender, damageToAttacker,      True, True,  False)`
+        //    —— 这两个 bool 就是 `OnCardDealDamage` 的 `isCombatDamage` / `CounterDamage`，
+        //    也决定伤害修正链的 `fromAttack` / `isDefenderDamage`
+        //    （`CalculateDamageDealt` si=473/734）。不传等于「攻击不算战斗伤害」。
+        Api.DealDamage(defender, attackerDamage, attacker, isCombatDamage: true);
         if (!defender.IsHq && defender.IsAlive && defenderDamage > 0)
         {
-            Api.DealDamage(attacker, defenderDamage, defender);
+            Api.DealDamage(attacker, defenderDamage, defender, isCombatDamage: true, counterDamage: true);
         }
 
         // ---- 「战斗存活」----

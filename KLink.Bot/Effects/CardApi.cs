@@ -328,7 +328,42 @@ public sealed partial class CardApi
         IReadOnlyDictionary<string, object?>? namedArgs = null,
         Func<CardInstance, IReadOnlyDictionary<string, object?>?>? seedFactory = null)
     {
-        var results = new List<object?>();
+        var bags = BroadcastWithOutParams(programName, subject, controller, new[] { outParamName },
+                                          seed, eventArgs, eventSubject, namedArgs, seedFactory);
+        var results = new List<object?>(bags.Count);
+        foreach (var (_, outs) in bags)
+        {
+            results.Add(outs.GetValueOrDefault(outParamName));
+        }
+
+        return results;
+    }
+
+    /// <summary>一次「带出参的派发」的结果：派发到哪张卡 + 它写回的出参。</summary>
+    public readonly record struct OutParamHit(CardInstance Card, IReadOnlyDictionary<string, object?> Outs);
+
+    /// <summary>
+    /// <see cref="BroadcastWithOutParam"/> 的多出参版本。
+    ///
+    /// 需要它是因为 `OnOtherCardDealDamageAddDamage` 有**两个**出参
+    /// （`damageToAdd` + `reRunAtEnd`，见 <see cref="ExecuteOnDealDamageAddDamage"/>），
+    /// 而单出参版只能取回一个。返回的字典对每个请求过的名字都给键
+    /// （函数体没写到的值为 null），免得调用方分不清「没这个出参」和「出参是空」。
+    ///
+    /// 额外回传**是哪张卡**：蓝图的 `reRunAtEnd` 语义是「把这张**卡**记下来，
+    /// 最后整轮再派发一次」（`si=623 Array_Add(addDamageToReRun, item)`），
+    /// 光有出参值重建不出这一批卡。
+    /// </summary>
+    public List<OutParamHit> BroadcastWithOutParams(
+        string programName, CardInstance? subject, Side controller, string[] outParamNames,
+        IReadOnlyDictionary<string, object?>? seed = null,
+        IReadOnlyList<object?>? eventArgs = null,
+        CardInstance? eventSubject = null,
+        IReadOnlyDictionary<string, object?>? namedArgs = null,
+        Func<CardInstance, IReadOnlyDictionary<string, object?>?>? seedFactory = null,
+        IReadOnlyList<CardInstance>? only = null)
+    {
+        var results = new List<OutParamHit>();
         var library = Blueprint.KismetLibrary.Default;
         if (library is null)
         {
@@ -336,13 +371,22 @@ public sealed partial class CardApi
         }
 
         // 快照规则与 FireTrigger 一致：棋盘 + 弃牌堆，按嵌套深度分开缓冲。
-        var snapshot = SnapshotBuffer(_triggerDepth);
-        snapshot.Clear();
-        for (int i = 0; i < 2; i++)
+        // ⚠️ 必须先快照：被派发的程序内部会创建/销毁卡（`receiver` 可能被打死）。
+        List<CardInstance> snapshot;
+        if (only is not null)
         {
-            Side s = i == 0 ? Side.Left : Side.Right;
-            snapshot.AddRange(State.Board(s));
-            snapshot.AddRange(State.Discard(s));
+            snapshot = new List<CardInstance>(only);
+        }
+        else
+        {
+            snapshot = SnapshotBuffer(_triggerDepth);
+            snapshot.Clear();
+            for (int i = 0; i < 2; i++)
+            {
+                Side s = i == 0 ? Side.Left : Side.Right;
+                snapshot.AddRange(State.Board(s));
+                snapshot.AddRange(State.Discard(s));
+            }
         }
 
         CardInstance? eventCard = eventSubject ?? subject;
@@ -359,7 +403,7 @@ public sealed partial class CardApi
                 continue;
             }
 
-            TriggerTrace?.Add($"{programName}(out {outParamName}) → {card.Name}#{card.CardId}" +
+            TriggerTrace?.Add($"{programName}(out {string.Join("/", outParamNames)}) → {card.Name}#{card.CardId}" +
                               $"（eventCard={eventCard?.Name ?? "null"}#{eventCard?.CardId}）");
 
             var ctx = new EffectContext
@@ -385,8 +429,8 @@ public sealed partial class CardApi
             try
             {
                 var perCardSeed = seedFactory?.Invoke(card) ?? seed;
-                var bag = Vm.RunLocalProgramMulti(program, ctx, perCardSeed, outParamName);
-                results.Add(bag.GetValueOrDefault(outParamName));
+                results.Add(new OutParamHit(card,
+                    Vm.RunLocalProgramMulti(program, ctx, perCardSeed, outParamNames)));
             }
             finally
             {
@@ -605,9 +649,65 @@ public sealed partial class CardApi
         return _triggerBuffers[depth];
     }
 
-    private CardInstance? FindOnBoard(string cardName, CardInstance? prefer)
+    /// <summary>
+    /// 跑**这张卡自己的**局部函数（IR 的 `locals`，独立 export 的函数图），取回若干出参。
+    ///
+    /// 与 <see cref="BroadcastWithOutParams"/> 的区别：那条是「广播给所有订阅者」，
+    /// 这条是「只问这一张卡」—— `OnCardDealDamage_ModifyDamageDealt` 在蓝图里就是
+    /// `_damageDealerCard.OnCardDealDamage_ModifyDamageDealt(…)`（`si=692` 一次直接调用），
+    /// 不是 `FetchAllCardsWithEventTrigger` 那种订阅表。
+    ///
+    /// 用 `FindLocalProgram` 而不是 `FindProgram`：后者会先查 `entrypoints`，
+    /// 命中就合成 ubergraph 的分派前导 —— 对带出参的普通函数是错的
+    /// （它们根本不在 ubergraph 里，见 P1 §1）。
+    ///
+    /// 返回 null = **这张卡没有这个函数**（全卡池 1735 张里只有 33 张有
+    /// `OnCardDealDamage_ModifyDamageDealt`）。调用方必须把 null 当「默认体」处理，
+    /// 不能拿一个猜的默认值顶替。
+    /// </summary>
+    private IReadOnlyDictionary<string, object?>? RunOwnLocal(
+        CardInstance card, string functionName,
+        IReadOnlyDictionary<string, object?>? seed, params string[] outNames)
     {
-        if (prefer is not null && prefer.IsAlive
+        var program = Blueprint.KismetLibrary.Default?.FindLocalProgram(card.Definition.Name, functionName);
+        if (program is null)
+        {
+            return null;
+        }
+
+        if (_triggerDepth >= MaxTriggerDepth)
+        {
+            Vm.UnsupportedOps["<trigger-depth-limit>"] =
+                Vm.UnsupportedOps.GetValueOrDefault("<trigger-depth-limit>") + 1;
+            return null;
+        }
+
+        var ctx = new EffectContext
+        {
+            Engine = _engine,
+            State = State,
+            Self = card,
+            Target = seed is not null && seed.TryGetValue("toCard", out var t) ? t as CardInstance : null,
+            Controller = card.Owner,
+            NamedArgs = EffectContext.EmptyNamedArgsPublic,
+        };
+
+        TriggerTrace?.Add($"{functionName}(out {string.Join("/", outNames)}) → {card.Name}#{card.CardId}" +
+                          $"（本卡自己的函数体）");
+
+        _triggerDepth++;
+        try
+        {
+            return Vm.RunLocalProgramMulti(program, ctx, seed, outNames);
+        }
+        finally
+        {
+            _triggerDepth--;
+        }
+    }
+
+    private CardInstance? FindOnBoard(string cardName, CardInstance? prefer)
+    {        if (prefer is not null && prefer.IsAlive
             && (prefer.Name == cardName || prefer.Definition.Name == cardName))
         {
             return prefer;
@@ -686,21 +786,196 @@ public sealed partial class CardApi
     //  通用操作（被效果脚本使用）
     // ==================================================================
 
-    /// <summary>造成伤害。所有伤害都走这里，保证事件顺序一致。</summary>
+    /// <summary>
+    /// **伤害修正链**：`BP_CardFunctions::ExecuteOnDealDamageAddDamage`（46 条语句，
+    /// 带出参 `calculatedDamage`）—— 每一次伤害结算**之前**的唯一修正入口。
+    ///
+    /// 出处 `out/bp-cardfn.json`（`si` = StatementIndex，`Jump/JumpIfNot` 的 `Offset`
+    /// 就是目标 `StatementIndex`，1599/1599 已验证）：
+    /// <code>
+    /// si=0    PushExecutionFlow(1453)                       ; 返回哨兵
+    /// si=5    JumpIfNot(_damageDealerCard.isSuppressed) -> 692
+    /// si=41       _dealerCalculatedDamage = damage          ; ★ 被压制：**不调** ModifyDamageDealt
+    /// si=68   Array_Clear(addDamageToReRun)
+    /// si=109  FetchAllCardsWithEventTrigger(37)             ; 37 = OnOtherCardDealDamageAddDamage
+    /// si=382      item.OnOtherCardDealDamageAddDamage(_damageDealerCard, _damageRecieverCard,
+    ///                     _dealerCalculatedDamage, _fromAttack, _isDefenderDamage,
+    ///                     out damageToAdd, out reRunAtEnd)
+    /// si=481/527  _dealerCalculatedDamage += damageToAdd
+    /// si=554      PopExecutionFlowIfNot(reRunAtEnd)         ; 假 ⇒ 直接 continue
+    /// si=623      addDamageToReRun.Add(item)                ; 真 ⇒ 记下来
+    /// si=805   loop2 over addDamageToReRun                  ; 整轮再派发一次（出参 reRunAtEnd 不再读）
+    /// si=1053     item.OnOtherCardDealDamageAddDamage(…, out damageToAdd, out reRunAtEnd)
+    /// si=1198     _dealerCalculatedDamage += damageToAdd
+    /// si=1300 Clamp(_dealerCalculatedDamage, 0, 99)  -> out calculatedDamage
+    /// si=692  （dealer **没被压制**才到这里）
+    ///         _damageDealerCard.OnCardDealDamage_ModifyDamageDealt(_damageRecieverCard, damage,
+    ///                     _fromAttack, fromFight, out newDamage)
+    /// si=773      _dealerCalculatedDamage = newDamage
+    /// si=800  Jump -> 68                                    ; 再进上面那两轮观察者循环
+    /// </code>
+    ///
+    /// ⚠️ **`si=5` 的极性**（容易读反）：`JumpIfNot` 是「条件为假才跳」，
+    /// 所以 **没被压制 ⇒ 跳到 692 调 `ModifyDamageDealt`**；被压制 ⇒ 落到 si=41
+    /// 直接 `_dealerCalculatedDamage = damage`。也就是「压制 = 关掉这张卡自己的伤害修正」，
+    /// 与 `MatchEngine.Attack` 里那条「压制不禁止攻击、只不触发伤害修正」一致。
+    ///
+    /// ⚠️ 观察者循环**不**受压制影响：`OnOtherCardDealDamageAddDamage` 是**别人**的
+    /// 加成（例如 `card_unit_the_rangers`「友方单位造成伤害时 +1」），压制某一张卡
+    /// 不该关掉别人的能力。
+    ///
+    /// 入参顺序来自资产里的 `FunctionExport.LoadedProperties`（`CPF_Parm` 声明序，
+    /// 见 `ref/kards-sim/KardsTranspiler/BlueprintSignatures.cs` 的取法）：
+    /// <c>_damageDealerCard, _damageRecieverCard, damage, _fromAttack, fromFight,
+    /// _isDefenderDamage, out calculatedDamage</c>。
+    /// 调用点互证（同名入参在函数体里就是这些裸变量名）：
+    /// <code>
+    /// DamageCard si=690          (dealer, card, amount, False, fromFight, False)      ; 效果伤害
+    /// MakeCardsFight si=303/488  (a, b, dmg, False, True, False)                     ; 互斗
+    /// CalculateDamageDealt si=473 (dealer, recv, dmg, True, False, !dealerIsAttacker)
+    /// CalculateDamageDealt si=734 (recv, dealer, dmg, True, False, dealerIsAttacker)
+    ///   ⇒ 主伤害 isDefenderDamage=False、反击 isDefenderDamage=True（两次调用同结论）
+    /// </code>
+    ///
+    /// 调用点（`out/bp-cardfn.json`）：`CalculateDamageDealt`(si=473/734/4552)、
+    /// `DamageCard`(si=690)、`AttackCard`、`MakeCardsFight`、`ApplyDamageToMultipleCards`。
+    ///
+    /// ⚠️ **本内核的近似（写清楚）**：蓝图里 `AttackCard` 会调两次 `CalculateDamageDealt`
+    /// （si=3807 / si=4004，各算两个方向），于是每个方向会被修正 **两次**。
+    /// 33 张 `OnCardDealDamage_ModifyDamageDealt` 的函数体**全是纯函数**
+    /// （只用 `IsTank`/`IsAirUnit`/`getTotalAttack` 这类只读谓词，见
+    /// `out/audit/p1b-vars.py`），所以重复调用幂等、结果相同。
+    /// 内核没有 `CalculateDamageDealt` 这一层，`DealDamage` 是唯一漏斗，
+    /// 因此**每次伤害实例只修正一次** —— 对纯函数等价，且天然不会重复计副作用。
+    /// </summary>
+    /// <param name="dealer">造成伤害的那张卡（`_damageDealerCard`）。可为 null（无来源伤害）。</param>
+    /// <param name="receiver">挨打的那张卡（`_damageRecieverCard`）。</param>
+    /// <param name="damage">修正前的伤害值。</param>
+    /// <param name="fromAttack">是不是攻击结算的伤害（`isCombatDamage`）。</param>
+    /// <param name="fromFight">是不是「让两个单位互斗」产生的伤害（`MakeCardsFight` 传 true）。</param>
+    /// <param name="isDefenderDamage">是不是**防御方的反击**伤害。</param>
+    /// <returns>`Clamp(修正后的伤害, 0, 99)`。</returns>
+    public int ExecuteOnDealDamageAddDamage(CardInstance? dealer, CardInstance receiver, int damage,
+                                            bool fromAttack, bool fromFight, bool isDefenderDamage)
+    {
+        int calculated = damage;
+
+        // si=5 / si=692：没被压制 ⇒ 问这张卡自己的修正函数；被压制 ⇒ 原样。
+        // 入参喂的是**原始** `damage`（si=692 传的是 `damage`，不是累加值）。
+        if (dealer is not null && !dealer.Keywords.Contains(Keyword.Suppressed))
+        {
+            var seed = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["toCard"] = receiver,
+                ["damage"] = damage,
+                ["fromAttack"] = fromAttack,
+                ["fromFight"] = fromFight,
+            };
+
+            var outs = RunOwnLocal(dealer, "OnCardDealDamage_ModifyDamageDealt", seed, "newDamage");
+            if (outs is not null)
+            {
+                calculated = AsInt(outs.GetValueOrDefault("newDamage"));
+            }
+            // outs == null ⇒ 这张卡没有这个函数（全卡池 1735 张里只有 33 张有），
+            // 蓝图里 `BlueprintNativeEvent` 的默认体就是「不修改伤害」。
+        }
+
+        // si=109：事件 37 的订阅者。**含主体自己**（这一段没有 `NotEqual(item, dealer)`）。
+        var first = BroadcastWithOutParams(
+            "OnOtherCardDealDamageAddDamage", dealer, receiver.Owner, new[] { "damageToAdd", "reRunAtEnd" },
+            eventArgs: new object?[] { dealer, receiver, calculated, fromAttack, isDefenderDamage },
+            eventSubject: dealer,
+            namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["cardDealingDamage"] = dealer,
+                ["toCard"] = receiver,
+                ["damage"] = calculated,
+                ["fromAttack"] = fromAttack,
+                ["isDefenderDamage"] = isDefenderDamage,
+            },
+            seedFactory: _ => new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["cardDealingDamage"] = dealer,
+                ["toCard"] = receiver,
+                ["damage"] = calculated,
+                ["fromAttack"] = fromAttack,
+                ["isDefenderDamage"] = isDefenderDamage,
+            });
+
+        var reRun = new List<CardInstance>();
+        foreach (var (card, outs) in first)
+        {
+            calculated += AsInt(outs.GetValueOrDefault("damageToAdd"));
+            if (Blueprint.KismetVm.Truthy(outs.GetValueOrDefault("reRunAtEnd")))
+            {
+                // si=623：记的是**卡**（`Array_Add(addDamageToReRun, item)`），不是值。
+                reRun.Add(card);
+            }
+        }
+
+        // si=805..1295：对 reRunAtEnd 的那批再整轮派发一次（第二次不再看 reRunAtEnd）。
+        if (reRun.Count > 0)
+        {
+            var second = BroadcastWithOutParams(
+                "OnOtherCardDealDamageAddDamage", dealer, receiver.Owner, new[] { "damageToAdd", "reRunAtEnd" },
+                eventArgs: new object?[] { dealer, receiver, calculated, fromAttack, isDefenderDamage },
+                eventSubject: dealer,
+                namedArgs: new Dictionary<string, object?>(StringComparer.Ordinal)
+                {
+                    ["cardDealingDamage"] = dealer,
+                    ["toCard"] = receiver,
+                    ["damage"] = calculated,
+                    ["fromAttack"] = fromAttack,
+                    ["isDefenderDamage"] = isDefenderDamage,
+                },
+                only: reRun);
+            foreach (var (_, outs) in second)
+            {
+                calculated += AsInt(outs.GetValueOrDefault("damageToAdd"));
+            }
+        }
+
+        // si=1300：Clamp(.., 0, 99)
+        return Math.Clamp(calculated, 0, 99);
+    }
+
+    /// <summary>「造成伤害。所有伤害都走这里，保证事件顺序一致。」</summary>
     /// <param name="isCombatDamage">
     /// 是不是战斗伤害（攻击结算）。判据来自蓝图：`ExecuteAttackCard` 调
     /// `ExecuteOnCardDealDamageEffects(…, isCombatDamage=True, …)` 两次
-    /// （i=3363 防守方受伤、i=3451 攻击方反击受伤），
-    /// 而 `ApplyDamageToCard` i=1808 / `ApplyDamageToMultipleCards` i=4933
+    /// （si=3363 防守方受伤、si=3451 攻击方反击受伤），
+    /// 而 `ApplyDamageToCard` si=1808 / `ApplyDamageToMultipleCards` si=4933
     /// 都是 `False` —— 也就是"效果伤害"。
     /// </param>
-    /// <param name="counterDamage">是不是反击伤害（`ExecuteAttackCard` i=3451 传 True）。</param>
+    /// <param name="counterDamage">是不是反击伤害（`ExecuteAttackCard` si=3451 传 True）。</param>
+    /// <param name="fromFight">
+    /// 是不是「两个单位互斗」（`MakeCardsFight` 传 True）产生的伤害。
+    /// 出处 `MakeCardsFight` si=303/488：`ExecuteOnDealDamageAddDamage(a, b, dmg, False, True, False)`。
+    /// </param>
     public void DealDamage(CardInstance target, int amount, CardInstance? source,
-                           bool isCombatDamage = false, bool counterDamage = false, bool isRedirected = false)
+                           bool isCombatDamage = false, bool counterDamage = false, bool isRedirected = false,
+                           bool fromFight = false)
     {
         if (amount <= 0 || !target.IsAlive)
         {
             return;
+        }
+
+        // ---- 伤害修正链（P1，2026-09-30）----
+        //
+        // 位置与蓝图一致：`ExecuteOnDealDamageAddDamage` 在**伤害真正落地之前**跑
+        // （`DamageCard` si=690 → si=190 `ExecuteOnDealDamageAddDamageAfterCalc` → si=251
+        //  `ApplyDamageToCard`），所以这里放在 `ApplyDamage` 之前，
+        // 后面的事件/ZAction 自然带的就是**修正后**的值。
+        //
+        // ⚠️ `isRedirected` 为 true 时**整条修正链跳过** —— 蓝图 `DamageCard`
+        // si=149 `JumpIfNot(isRedirected) -> si=690`：重定向伤害（把伤害原样转给另一张卡）
+        // 不再问一遍修正者，否则同一笔伤害会被加两次。
+        if (!isRedirected)
+        {
+            amount = ExecuteOnDealDamageAddDamage(source, target, amount,
+                                                  isCombatDamage, fromFight, counterDamage);
         }
 
         _engine.ApplyDamage(target, amount, source);
