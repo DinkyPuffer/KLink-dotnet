@@ -64,7 +64,7 @@ public sealed class KismetLibrary
         var index = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var (cardName, card) in _cards)
         {
-            foreach (string program in card.Entrypoints.Keys)
+            foreach (string program in card.Entrypoints.Keys.Concat(card.Locals.Keys.Where(IsEventName)))
             {
                 if (program.StartsWith("OnPlayedFromHand", StringComparison.Ordinal))
                 {
@@ -123,23 +123,43 @@ public sealed class KismetLibrary
     {
         foreach (string candidate in Candidates(cardName))
         {
-            if (_cards.TryGetValue(candidate, out var card)
-                && card.Entrypoints.TryGetValue(programName, out int entry))
+            if (!_cards.TryGetValue(candidate, out var card))
             {
-                if (!_programCache.TryGetValue(candidate, out var perCard))
-                {
-                    perCard = new Dictionary<string, KismetProgram>(StringComparer.Ordinal);
-                    _programCache[candidate] = perCard;
-                }
-
-                if (!perCard.TryGetValue(programName, out var program))
-                {
-                    program = BuildEntryProgram(card, entry);
-                    perCard[programName] = program;
-                }
-
-                return program;
+                continue;
             }
+
+            if (!card.Entrypoints.TryGetValue(programName, out int entry))
+            {
+                // ⚠️ 2026-09-30（P1 Deployment）：**回退查 `locals`**。
+                //
+                // 带 `out` 参数的事件处理函数是独立 export 的函数图（函数体自成一套
+                // 语句下标，入口 = 第一条语句），生成器把它们编进了 `locals`。
+                // 不回退的话，`FireTrigger("OnBeforeOtherCardDeploymentTrigger", …)`
+                // 这类派发会**静默找不到程序**——163 个函数体白编。
+                //
+                // 用 `FindLocalProgram` 而不是 `BuildEntryProgram`：后者会合成
+                // ubergraph 的分派前导（`pushFlow`/`jump`），对独立函数是错的。
+                if (card.Locals.ContainsKey(programName))
+                {
+                    return FindLocalProgram(candidate, programName);
+                }
+
+                continue;
+            }
+
+            if (!_programCache.TryGetValue(candidate, out var perCard))
+            {
+                perCard = new Dictionary<string, KismetProgram>(StringComparer.Ordinal);
+                _programCache[candidate] = perCard;
+            }
+
+            if (!perCard.TryGetValue(programName, out var program))
+            {
+                program = BuildEntryProgram(card, entry);
+                perCard[programName] = program;
+            }
+
+            return program;
         }
 
         return null;
@@ -302,18 +322,39 @@ public sealed class KismetLibrary
                null, null, to, null, null);
 
     /// <summary>该卡注册了哪些事件（含变体回退）。</summary>
+    /// <remarks>
+    /// ⚠️ 2026-09-30（P1 Deployment）：**必须并上 `locals` 里的独立事件函数**。
+    ///
+    /// 带 `out` 参数的事件处理函数（`OnBeforeOtherCardDeploymentTrigger` /
+    /// `OnDeploymentEffectTriggered` / `OnDestructionEffectTriggered` /
+    /// `OnCardDealDamage_ModifyDamageDealt` …）在蓝图里是**独立 export 的函数图**，
+    /// 不经过 ubergraph，所以既没有 `entrypoints` 条目、也不在 `Steps` 里 ——
+    /// 它们被编进了 `locals`（见 `gen-kismet-ir.py` 的 `is_standalone_event`）。
+    ///
+    /// 这里漏掉的后果有两处，都是静默的：
+    ///   1. <see cref="CardApi.RunCardEffect"/> 第 3 步用 `ProgramNames` 判
+    ///      「这张卡是触发式卡，不是缺口」—— 只收 `entrypoints` 的话，
+    ///      **99 张只有独立事件函数的卡**会被误报成"没有蓝图逻辑"。
+    ///   2. <see cref="BuildTriggerIndex"/> 用它建订阅表。
+    /// </remarks>
     public IEnumerable<string> ProgramNames(string cardName)
     {
         foreach (string candidate in Candidates(cardName))
         {
             if (_cards.TryGetValue(candidate, out var card))
             {
-                return card.Entrypoints.Keys;
+                return card.Entrypoints.Keys
+                    .Concat(card.Locals.Keys.Where(IsEventName));
             }
         }
 
         return Enumerable.Empty<string>();
     }
+
+    /// <summary>函数名看起来是不是事件（`On*`，且不是 `__DelegateSignature`）。</summary>
+    private static bool IsEventName(string name)
+        => name.StartsWith("On", StringComparison.Ordinal)
+           && !name.EndsWith("__DelegateSignature", StringComparison.Ordinal);
 
     /// <summary>变体回退之后的实际卡名（IR 里存的是基础卡）。</summary>
     public string? ResolveCardName(string cardName)
