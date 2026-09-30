@@ -1591,20 +1591,22 @@ public sealed partial class CardApi
         //   si=103 JumpIfNot → si=472（qqq=False + return）★ **客户端在这里拒绝**
         //   si=117 instigatorID > 0  → si=151 JumpIfNot → si=393（return）
         //
-        // ⚠️⚠️ **这一条在本内核里【不落地】，理由是可复现的反证，不是偷懒**：
-        //    把 `CanCardBeBuffed` 当成硬门加上去之后，**4 条蓝图推导出来的自测立刻失败**
-        //    （2026-09-27 实测：`dotnet run --project tools/BotSim -- selftest` 33 → 4 项失败）：
-        //      · 红牛 `card_unit_red_bull`：`OnStartOfTurn` 先判 `IsLocatedOnBoard(self)`，
-        //        再 `ChangeAttack(self, getTotalAttack(), changeType=1)` —— **卡自己就要求在场**，
-        //        然后在场的目标又被 `CanCardBeBuffed` 拒掉，自相矛盾；
-        //      · 爱国热忱（目标翻倍）、敢死队（Spitfire 部署 +3+3）、
-        //        3 掷弹兵（德国单位操作 +1+1）同理，全是**在场单位**的数值改动。
-        //    ⇒ 客户端蓝图里 `ChangeAttack` 的这道门守的是**客户端自己的 buff 记账**
-        //      （手牌/牌库卡的 buff 预览），真实对局里在场单位的数值由服务端权威结算。
-        //      本内核跑的是"规则复刻"，不是"客户端预览"，所以这里只保留判据函数本身
-        //      （`CardApi.CanCardBeBuffed`，供自测与将来需要它的地方用），不加硬门。
-        //      这是一条**有证据的取舍**：审计 §6 的 8d 描述与 4 条自测直接冲突，
-        //      冲突没解之前，宁可不加（加了会把 4 条已证的规则打坏）。
+        // ⚠️⚠️ **这一条在本内核里【不落地】—— 理由已更新（2026-09-30）**：
+        //
+        // 旧理由（**已作废，别再引用**）：「蓝图自相矛盾」—— 红牛 `OnStartOfTurn` 先判
+        //   `IsLocatedOnBoard(self)` 再 `ChangeAttack(self,…)`，卡自己要求在场、门又拒绝在场，
+        //   于是把 4 条蓝图自测当成反证。**那个"矛盾"是我们自己实现的 bug 造出来的**：
+        //   `CardApi.CanCardBeBuffed` 当时把 `si=41` 的分支极性读反了，对在场单位返回 false。
+        //   真语义是「**不是**未揭示的隐蔽卡 ⇒ 直接放行（true）」（取证见
+        //   `klink bot/docs/CanCardBeBuffed矛盾调查.md` 与 `CardApi.CanCardBeBuffed` 的注释）。
+        //   ⇒ 红牛 / 爱国热忱 / 敢死队 / 3 掷弹兵那 4 条自测**从此不构成反证**。
+        //
+        // 新理由（本内核的事实）：**这道门在本内核里恒真 ⇒ 加了是空转。**
+        //   门的形状是 `if (!IsUnrevealedCovertCard(card)) return true;`，而内核没有建模
+        //   Covert 的「已揭示/未揭示」状态（P1 只到 `Keyword.Covert` + `getHasCovert` 判据面），
+        //   所以恒真。等 Covert 状态落地之后，这里再加门才有意义 —— 那时它会真的挡人。
+        //   ⚠️ 加门时**必须**用修好之后的 `CardApi.CanCardBeBuffed`：用旧实现会立刻打死
+        //   334 张 `ChangeAttack` + 311 张 `ChangeDefense` 的攻防改动。
         int delta = IntArg(a, 2);
         ChangeAttack(target, invert ? -delta : delta, c.Self);
         return null;
@@ -1619,7 +1621,7 @@ public sealed partial class CardApi
         }
 
         // 同 `DoChangeAttack`：`ChangeDefense` si=48/80 是同一个守位，
-        // 同理**不落地**（4 条自测里的"爱国热忱"翻倍目标攻防就在这一支上）。
+        // 同理**不落地** —— 门在本内核恒真，加了是空转（理由见 `DoChangeAttack` 那段）。
         ChangeDefense(target, IntArg(a, 2), c.Self);
         return null;
     }

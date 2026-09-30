@@ -1106,30 +1106,83 @@ public sealed partial class CardApi
     /// 「这张卡能被加 buff 吗」—— 逐字对应 `BP_CardFunctions::CanCardBeBuffed`
     /// （`out/bp-cardfn.json`，30 条语句）：
     /// <code>
-    /// si=41   JumpIfNot(IsUnrevealedCovertCard(Card)) -> si=730   ; 未揭示的隐蔽卡 ⇒ 可以直接 buff
-    /// si=55..711  switch(Card.location)：
+    /// si=0    IsUnrevealedCovertCard(Card)
+    /// si=41   JumpIfNot(...) -> si=730
+    ///         ★ JumpIfNot 是「条件为**假**才跳」⇒ **不是**未揭示的隐蔽卡 ⇒ si=730
+    ///           `CanBeBuffed = True`（si=741 Jump 773 Return）
+    /// si=55..711  switch(Card.location)      ; ★ 这张表**只对未揭示的隐蔽卡**生效
     ///             0(NotAvailable)                      → si=746  False
-    ///             1/2(牌库) 3/4(手牌)                  → si=762  True
+    ///             1/2(牌库) 3/4(手牌) 9(牌库)          → si=762  True
     ///             5/6(半场/HQ) 7(前线) 8(弃牌堆)        → si=746  False
-    ///             9(牌库)                              → si=762  True
+    /// si=725  （无匹配）Jump si=773 Return   ; out 参数默认值 False
     /// </code>
+    ///
+    /// ⚠️⚠️ **2026-09-30 修正（旧实现是错的，而且是个地雷）**：
+    /// 旧实现把 `si=55..711` 那张 switch **套在了所有卡上**，于是得出「在场单位 → false」。
+    /// 那是把 `si=41` 的分支极性读反了（注释里当时还写着「未揭示的隐蔽卡 ⇒ 可以直接 buff」）。
+    /// 三条**同资产内语义自明**的校准点把它钉死（都不是猜）：
+    /// <code>
+    /// ChangeAttack si=57   JumpIfNot(IsValid(card)) -> si=393              ; 卡**无效**才去报错
+    /// GiveSalvage  si=141  JumpIfNot(_card.hasSalvage) -> si=254           ; **没有** salvage 才去发
+    /// ChangeAttack si=934  JumpIfNot(EqualEqual(getAndDecryptAttack(card), amount)) -> si=960
+    ///                                                                       ; 数值**没变**才提前返回
+    /// </code>
+    /// 反向读法（真时跳）会让 `ChangeAttack` 只在卡无效时继续、`GiveSalvage` 只给已有 salvage 的卡发。
+    /// 完整取证见 `klink bot/docs/CanCardBeBuffed矛盾调查.md`（含 `xr-cardfunctions.bpasm` 与
+    /// `ref/kards-sim` 的独立解码交叉验证，偏移 730/746/762/773 三方一致）。
+    ///
     /// 调用点（同一份 dump，`CanCardBeBuffed` 出现在这些函数的守位）：
     /// `ChangeAttack` si=71/103、`ChangeDefense` si=48/80、`ChangeKreditCost` si=385/417、
     /// `CustomAbilityAdd` si=99/131，以及 `GiveGuard`/`GiveAlpine`/`GiveAmbush`/`GiveBlitz`/
-    /// `GiveBond`/`GiveFury`/`GiveShock`/`GiveSmokescreen` 一族各 si=94/126。
-    /// 语义：**buff 只能加在牌库/手牌里的卡上**；已经在场(5/6/7)或进了弃牌堆(8)的卡不再接受 buff
-    /// （那些卡的数值改动由别的路径负责，例如 `SetValue` 的绝对值设置与战斗结算）。
+    /// `GiveBond`/`GiveFury`/`GiveShock`/`GiveSmokescreen` 一族各 si=94/126，
+    /// 以及 `GiveAlpineBonus` si=5。
     ///
-    /// ⚠️ 本内核**没有建模 Covert**（P1），所以 `IsUnrevealedCovertCard` 恒假 ——
-    /// 也就是说这里不会出现"隐蔽卡例外"。这是已知近似。
+    /// ⚠️ **本内核里这道门恒为 true**：`IsUnrevealedCovertCard` 需要 Covert 的
+    /// 「已揭示 / 未揭示」状态机，而内核只做到 `Keyword.Covert` + `getHasCovert` 的**判据面**
+    /// （P1 §2），没有揭示状态 ⇒ 恒假 ⇒ 恒走 `si=730` 那一支。
+    /// 位置表保留在下面**不是为了留死代码**，而是等 Covert 状态落地时只改
+    /// <see cref="IsUnrevealedCovertCard"/> 一处。
     /// </summary>
-    public static bool CanCardBeBuffed(CardInstance card) => card.Location switch
+    public static bool CanCardBeBuffed(CardInstance card)
     {
-        CardLocation.DeckLeft or CardLocation.DeckRight => true,   // 1 / 2
-        CardLocation.HandLeft or CardLocation.HandRight => true,   // 3 / 4
-        CardLocation.Deck => true,                                 // 9
-        _ => false,                                                // 0 / 5 / 6 / 7 / 8
+        // si=41 `JumpIfNot(IsUnrevealedCovertCard(Card)) -> si=730`（730 = CanBeBuffed = True）
+        if (!IsUnrevealedCovertCard(card))
+        {
+            return true;
+        }
+
+        return CanUnrevealedCovertBeBuffed(card.Location);
+    }
+
+    /// <summary>
+    /// `CanCardBeBuffed` 的**位置表本体**（`si=55..711` 那 10 个
+    /// `NotEqual_ByteByte(location, N)` + `JumpIfNot`，落点 si=746/762）。
+    ///
+    /// 单独抽出来有两个理由：
+    /// 1. 蓝图的形状就是「先过 `IsUnrevealedCovertCard` 门，再查这张表」；
+    /// 2. 本内核拿不到「未揭示的隐蔽卡」，这张表在 `CanCardBeBuffed` 上**不可达** ——
+    ///    抽出来才能让自测**逐条**核对它（否则就是一段没人验的死代码）。
+    /// </summary>
+    public static bool CanUnrevealedCovertBeBuffed(CardLocation location) => location switch
+    {
+        CardLocation.DeckLeft or CardLocation.DeckRight => true,   // 1 / 2  → si=762
+        CardLocation.HandLeft or CardLocation.HandRight => true,   // 3 / 4  → si=762
+        CardLocation.Deck => true,                                 // 9      → si=762
+        _ => false,                                                // 0 / 5 / 6 / 7 / 8 → si=746
     };
+
+    /// <summary>
+    /// `UBaseCardObject::IsUnrevealedCovertCard`（`CanCardBeBuffed` si=0 读的谓词）。
+    ///
+    /// ⚠️ **恒 false，如实说：内核没有建模「隐蔽卡的已揭示/未揭示」状态**。
+    /// P1 §2 只打通了 `Keyword.Covert` 常量 + `getHasCovert` / 成员读 `hasCovert`
+    /// 这一层**判据面**（11 张卡），揭示状态机（`IsUnrevealedCovertCard` 的真判据、
+    /// 以及揭示时机）整条都还没做。
+    ///
+    /// 单独抽成函数而不是在门里写 `if (true)`：这样 Covert 状态落地时只改这一处，
+    /// 而且调用方（`CanCardBeBuffed`）的形状与蓝图逐字一致。
+    /// </summary>
+    public static bool IsUnrevealedCovertCard(CardInstance card) => false;
 
     public void ChangeAttack(CardInstance target, int delta, CardInstance? source, int duration = -1)
     {
