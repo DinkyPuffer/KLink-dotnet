@@ -596,8 +596,17 @@ public sealed class MatchEngine
         // ---- ③ 进场触发点 ----
         Api.FireTrigger("OnEnterPlay", card, card.Owner, "OnOtherCardEnterPlay", eventArgs: new object?[] { card, 0 });
 
-        // ---- ④ 战吼（卡自己的 OnPlayedFromHand）----
-        Api.RunCardEffect(card, target);
+        // ---- ④ 部署 / 战吼 ----
+        //
+        // 蓝图 `BP_CardFunctions::CardPlayedFromHand` 把「战吼」拆成两条路
+        // （`si=3640 JumpIfNot 5840 cond=cardPlayed.hasDeployment`）：
+        //   · 没有 `hasDeployment`（**全部 732 张指令** + 21 张没有该字段的单位）
+        //     → si=5840 处 `_triggerMultiple` 恒为 0，落到 si=6114 **跑一次** OnPlayedFromHand。
+        //   · 有 `hasDeployment`（249 张单位）→ 事件 14 取消钩子 → 事件 23 取 triggerMultiple
+        //     → OnPlayedFromHand 跑 `1 + triggerMultiple` 次。
+        // 两条路在「不取消、不翻倍」时**完全一样**，所以旧实现（无条件跑一次）对绝大多数
+        // 对局是对的；差别只在取消与翻倍。见 `RunDeploymentEffect` 的注释。
+        RunDeploymentEffect(card, target);
 
         // ---- ⑤「别的卡从手牌被打出」----
         // 这一条以前**根本没接**，所以 card_unit_85_pioneer_company /
@@ -607,6 +616,66 @@ public sealed class MatchEngine
 
         CheckDeaths();
         return true;
+    }
+
+    /// <summary>
+    /// 部署链 —— 蓝图 <c>BP_CardFunctions::CardPlayedFromHand</c> 的 si=3640..6434。
+    ///
+    /// **这是「一个机制」，不是「249 张卡各写各的」。** 249 张 `hasDeployment` 卡的
+    /// 部署文本各自写在**那张卡自己的 `OnPlayedFromHand`** 里；引擎侧只有这一条链：
+    /// 门 → 取消钩子（事件 14）→ 取翻倍数（事件 23）→ 跑 `1 + triggerMultiple` 次自己的
+    /// `OnPlayedFromHand`。所以内核只要实现这一条，249 张卡的**公共时序**就全对了。
+    ///
+    /// 逐条出处（`out/bp-cardfn.json`，`StatementIndex` 与 Jump 的 `Offset` 同坐标系，
+    /// 已用 `out/audit/p1-jump-targets.py` 验证 1599 条跳转 100% 落在语句集内）：
+    /// <code>
+    /// si=3640  JumpIfNot 5840 cond=cardPlayed.hasDeployment
+    /// si=3676  FetchAllCardsWithEventTrigger(14)     ; OnBeforeOtherCardDeploymentTrigger
+    /// si=4081  PopExecutionFlowIfNot(cancelDeploymentEffect)
+    /// si=4197  breakFlag = true                      ; 有订阅者取消 ⇒ 跳出
+    /// si=4283  JumpIfNot 5702 if !cancelDeploymentEffect
+    /// si=4297..4881  取消分支（NotifySideEffectTrigger 'sideeffect.blockdeployment' + 返回）
+    /// si=5702  EqualEqual_IntInt(targetCardID, 0)    ; ★ 只有**非指向性**部署才取翻倍数
+    /// si=5750  ExecuteOnDeploymentTriggered(cardPlayed, cardPlayed.cardID, out triggerMultiple)
+    /// si=5813  _triggerMultiple = triggerMultiple
+    /// si=6082/6114  cardPlayed.OnPlayedFromHand(GetCardFromID(targetCardID))   ; 第 1 次
+    /// si=6159  if (_triggerMultiple &gt; 0)
+    /// si=6230  while (Temp_int_Variable &lt;= _triggerMultiple) { si=6319 OnPlayedFromHand(...) }
+    /// </code>
+    ///
+    /// 「取消 ⇒ 不跑效果」这一条不是靠语句顺序推的：用
+    /// `out/audit/p1-cfg.py CardPlayedFromHand 4297` 做可达性分析，从取消分支出发
+    /// 可达的 44 条语句**全部**终止于 si=6853 `Return`，不经过 5702/6114。
+    /// 卡面文本独立互证：`card_unit_petlyakov_pe_2ft`「Deployment effects do not trigger.」。
+    ///
+    /// ⚠️ **没做**的一件小事：`si=4308 NotifySideEffectTrigger(side, 'sideeffect.blockdeployment')`
+    /// —— 内核里 `NotifySideEffectTrigger` 整条原语都没有实现（副作用通知通道），
+    /// 不是本次范围，这里不猜它的子动作名。
+    /// </summary>
+    private void RunDeploymentEffect(CardInstance card, CardInstance? target)
+    {
+        // si=3640：没有 hasDeployment 的卡（全部指令 + 21 张没这个字段的单位）走 si=5840，
+        // 那条路上 `_triggerMultiple` 恒 0 ⇒ 只跑一次，且**没有取消钩子**。
+        if (!card.Keywords.Contains(Keyword.Deployment))
+        {
+            Api.RunCardEffect(card, target);
+            return;
+        }
+
+        // si=3676..4278：事件 14 的取消钩子。
+        if (Api.FireDeploymentCancelHook(card))
+        {
+            return;   // si=4297..4881：取消 ⇒ 整条部署效果不跑
+        }
+
+        // si=5702/5750：只在「非指向性」部署时取翻倍数（targetCardID == 0）。
+        int triggerMultiple = target is null ? Api.SumDeploymentTriggerMultiple(card) : 0;
+
+        // si=6114（第 1 次）+ si=6230..6434（再 triggerMultiple 次）。
+        for (int i = 0; i <= triggerMultiple; i++)
+        {
+            Api.RunCardEffect(card, target);
+        }
     }
 
     /// <summary>

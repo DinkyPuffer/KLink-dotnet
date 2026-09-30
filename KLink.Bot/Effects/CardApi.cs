@@ -287,6 +287,217 @@ public sealed partial class CardApi
     /// <summary>触发派发用的快照缓冲，按嵌套深度索引（FireTrigger 会重入）。</summary>
     private readonly List<List<CardInstance>> _triggerBuffers = new();
 
+    /// <summary>
+    /// 广播一个**带出参**的事件，并把每个订阅者写回的出参收集起来。
+    ///
+    /// 为什么 <see cref="FireTrigger"/> 不够：蓝图里有一族事件是靠出参回传结果的
+    /// —— 调用方循环 `FetchAllCardsWithEventTrigger(N)`，对每张订阅卡
+    /// `item.OnXxx(..., out value)`，然后**累加/判断**这个 value。
+    /// <see cref="FireTrigger"/> 丢掉返回值，这一族就整条断掉。
+    ///
+    /// 出处（`out/bp-cardfn.json`）：
+    /// <code>
+    /// ExecuteOnDeploymentTriggered（24 条语句）
+    ///   si=61   FetchAllCardsWithEventTrigger(23)
+    ///   si=334  item
+    ///   si=397  _triggerMultipleDeployment += item.OnDeploymentEffectTriggered_TriggerMultiple
+    ///   si=471  out:triggerMultiple = _triggerMultipleDeployment
+    ///
+    /// CardPlayedFromHand si=3676..4278（事件 14 的取消钩子）
+    ///   si=3676 FetchAllCardsWithEventTrigger(14)
+    ///   si=4081 PopExecutionFlowIfNot(cancelDeploymentEffect)   ; 假 ⇒ 继续循环
+    ///   si=4197 breakFlag = true                                ; 真 ⇒ 跳出
+    ///   ★ 这一段**没有** `NotEqual(item, cardPlayed)` 排除主体
+    ///     （对比事件 19 在 si=1386 就有）—— 所以订阅者集合**含主体自己**。
+    /// </code>
+    /// </summary>
+    /// <param name="outParamName">
+    /// 出参在函数体里的变量名（IR 把 `out:X` 编成普通的 `set dst="X"`）。
+    /// 例：`cancelDeploymentEffect` / `TriggerMultiple`。
+    /// </param>
+    /// <param name="seed">
+    /// 事件函数的**入参**。独立事件函数体里读的是裸变量名
+    /// （`cardDeploying` / `cardTriggered`），`Frame` 不认识它们，必须显式喂。
+    /// </param>
+    /// <returns>每个成功执行的订阅者写回的出参值，按派发顺序。</returns>
+    public List<object?> BroadcastWithOutParam(
+        string programName, CardInstance? subject, Side controller, string outParamName,
+        IReadOnlyDictionary<string, object?>? seed = null,
+        IReadOnlyList<object?>? eventArgs = null,
+        CardInstance? eventSubject = null,
+        IReadOnlyDictionary<string, object?>? namedArgs = null)
+    {
+        var results = new List<object?>();
+        var library = Blueprint.KismetLibrary.Default;
+        if (library is null)
+        {
+            return results;
+        }
+
+        // 快照规则与 FireTrigger 一致：棋盘 + 弃牌堆，按嵌套深度分开缓冲。
+        var snapshot = SnapshotBuffer(_triggerDepth);
+        snapshot.Clear();
+        for (int i = 0; i < 2; i++)
+        {
+            Side s = i == 0 ? Side.Left : Side.Right;
+            snapshot.AddRange(State.Board(s));
+            snapshot.AddRange(State.Discard(s));
+        }
+
+        CardInstance? eventCard = eventSubject ?? subject;
+        foreach (var card in snapshot)
+        {
+            if (card.Location == CardLocation.NotAvailable)
+            {
+                continue;
+            }
+
+            var program = library.FindProgram(card.Name, programName);
+            if (program is null)
+            {
+                continue;
+            }
+
+            TriggerTrace?.Add($"{programName}(out {outParamName}) → {card.Name}#{card.CardId}" +
+                              $"（eventCard={eventCard?.Name ?? "null"}#{eventCard?.CardId}）");
+
+            var ctx = new EffectContext
+            {
+                Engine = _engine,
+                State = State,
+                Self = card,
+                Target = eventCard,
+                Trigger = eventCard,
+                Controller = card.Owner,
+                EventArgs = eventArgs ?? Array.Empty<object?>(),
+                NamedArgs = namedArgs ?? EffectContext.EmptyNamedArgsPublic,
+            };
+
+            if (_triggerDepth >= MaxTriggerDepth)
+            {
+                Vm.UnsupportedOps["<trigger-depth-limit>"] =
+                    Vm.UnsupportedOps.GetValueOrDefault("<trigger-depth-limit>") + 1;
+                continue;
+            }
+
+            _triggerDepth++;
+            try
+            {
+                var bag = Vm.RunLocalProgramMulti(program, ctx, seed, outParamName);
+                results.Add(bag.GetValueOrDefault(outParamName));
+            }
+            finally
+            {
+                _triggerDepth--;
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// 部署链的第一环：**「别的卡即将部署」钩子，任一订阅者可以取消整条部署效果**。
+    ///
+    /// 出处 `out/bp-cardfn.json` 的 `CardPlayedFromHand`（si=3640 起、`hasDeployment` 门内）：
+    /// <code>
+    /// si=3676  FetchAllCardsWithEventTrigger(14)          ; 14 = OnBeforeOtherCardDeploymentTrigger
+    /// si=4081  PopExecutionFlowIfNot(cancelDeploymentEffect)   ; 假 ⇒ 继续循环
+    /// si=4197  Temp_bool_True_if_break_was_hit_Variable = true ; 真 ⇒ 跳出
+    /// si=4283  JumpIfNot 5702 if !cancelDeploymentEffect
+    /// si=4297  （取消分支）OnPlayedFromHandExecuted = false
+    /// si=4308  NotifySideEffectTrigger(side, 'sideeffect.blockdeployment')
+    /// si=4881  Jump 6853                                    ; ★ 取消分支到此返回，
+    ///                                                        **不会**跑到 si=6114 的 OnPlayedFromHand
+    /// </code>
+    /// 控制流可达性用 `out/audit/p1-cfg.py CardPlayedFromHand 4297` 复核过：
+    /// 从 si=4297 出发可达 44 条语句，全部终止于 si=6853 `Return`，**不经过 5702/6114**。
+    ///
+    /// 语义与卡面文本互证（`out/cards-full2.json`）：
+    ///   · `card_unit_petlyakov_pe_2ft`「Deployment effects do not trigger.」
+    ///     —— 函数体 `cardDeploying.hasDeployment &amp;&amp; self.IsLocatedOnBoard()` ⇒ true
+    ///   · `card_event_evasive_action`「… Cancel the effect.」⇒ true
+    ///   · `card_event_close_call`「Counter an order or deployment effect…」⇒ true
+    ///   · `card_unit_buffs`「Gets +1+1 when it is targeted by an order or deployment effect.」
+    ///     —— 两条分支都写 false（它只加 buff，不取消）
+    /// </summary>
+    /// <returns>被取消了就返回 true。</returns>
+    public bool FireDeploymentCancelHook(CardInstance card)
+    {
+        var seed = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            // 函数体里的裸变量名（见 IR 的 locals 表）：
+            //   card_unit_petlyakov_pe_2ft / card_event_evasive_action / card_unit_buffs
+            //   都读 `cardDeploying`；`card_event_close_call` 还读 `cardDeploying.currentTarget`。
+            ["cardDeploying"] = card,
+            ["instigatorID"] = card.CardId,
+        };
+
+        var named = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["cardDeploying"] = card,
+        };
+
+        var outs = BroadcastWithOutParam(
+            "OnBeforeOtherCardDeploymentTrigger", card, card.Owner, "cancelDeploymentEffect",
+            seed: seed, eventArgs: new object?[] { card }, eventSubject: card, namedArgs: named);
+
+        foreach (var v in outs)
+        {
+            if (Blueprint.KismetVm.Truthy(v))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 部署链的第二环：<c>BP_CardFunctions::ExecuteOnDeploymentTriggered</c>（24 条语句）。
+    ///
+    /// <code>
+    /// si=5    _triggerMultipleDeployment = 0
+    /// si=61   FetchAllCardsWithEventTrigger(23)   ; 23 = OnDeploymentEffectTriggered
+    /// si=334  item
+    /// si=397  _triggerMultipleDeployment += item.OnDeploymentEffectTriggered_TriggerMultiple
+    /// si=443  _triggerMultipleDeployment = ...
+    /// si=471  out:triggerMultiple = _triggerMultipleDeployment
+    /// </code>
+    ///
+    /// 调用点 `CardPlayedFromHand` si=5702/5750：**只在 `targetCardID == 0` 时调用**
+    /// —— 也就是「**非指向性**部署效果」才算。卡面互证：
+    /// `card_unit_b_26_marauder`「Your **non-targeting** deployment effects trigger twice.」
+    /// 它的函数体正是 `cardTriggered.side == self.side &amp;&amp; self.IsLocatedOnBoard()`
+    /// ⇒ `TriggerMultiple = 1`（于是效果跑 `1 + 1 = 2` 次）。
+    /// </summary>
+    public int SumDeploymentTriggerMultiple(CardInstance card)
+    {
+        var seed = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["cardTriggered"] = card,
+            ["instigatorID"] = card.CardId,
+        };
+
+        var named = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["cardTriggered"] = card,
+            ["instigatorID"] = card.CardId,
+        };
+
+        var outs = BroadcastWithOutParam(
+            "OnDeploymentEffectTriggered", card, card.Owner, "TriggerMultiple",
+            seed: seed, eventArgs: new object?[] { card, card.CardId }, eventSubject: card,
+            namedArgs: named);
+
+        int total = 0;
+        foreach (var v in outs)
+        {
+            total += AsInt(v);
+        }
+
+        return total;
+    }
+
     /// <summary>诊断用：非 null 时记录每一次实际派发（`事件名 → 卡名#ID`）。</summary>
     public List<string>? TriggerTrace { get; set; }
 
