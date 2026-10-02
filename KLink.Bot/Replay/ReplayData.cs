@@ -22,6 +22,30 @@ public sealed class ReplayData
     public required int RightPlayerId { get; init; }
     public required string WinnerSide { get; init; }
 
+    /// <summary>
+    /// **这一局里「官方客户端」是哪一方**。
+    ///
+    /// ⚠️ **2026-10-02 起它不再参与发号**：生成卡的编号规则
+    /// （`回合号 × 1000 + 本回合第几张`）**对双方一致** —— 客户端的分配器
+    /// `GenerateNextCardID(turnNumber, out id)` 没有 side 参数
+    /// （`ref/kards-sim/.../_deps/BP_GameState_Battle.g.cs:1545`），
+    /// 详见 `GameState.NextCardId`。以前只给"客户端那一方"用是错的，
+    /// 会导致 bot 生成卡发顺序号 ⇒ 客户端认不出 ⇒ **虚空部署**。
+    ///
+    /// 现在这个字段只作为**诊断信息**保留（"哪一方是真人在打"），
+    /// 判据如下：
+    /// <list type="bullet">
+    /// <item>fyserver 给 bot 的占位 id 是**负数**（`-9178` = KLink，见 `tools/BotNameTest`），
+    ///   7 局服务端回放全是「左=人类、右=bot」。</item>
+    /// <item>两边都不是 bot（人人局 / 单边客户端日志）时，取**有动作的那一方**：
+    ///   实测 12 份 fresh/live 回放全是单边日志（右方只有 1 条空动作），
+    ///   录制方就是左方。两边都有动作且分不出时退回左方 —— 这个默认与
+    ///   所有实测数据一致，但**人人局的对局记录方本质上是不可判的**，
+    ///   真要精确就必须由调用方显式告知。</item>
+    /// </list>
+    /// </summary>
+    public required Side ClientSide { get; init; }
+
     /// <summary>开局快照里的全部卡（含 HQ）。</summary>
     public required IReadOnlyList<SnapshotCard> Cards { get; init; }
 
@@ -181,10 +205,47 @@ public sealed class ReplayData
             LeftPlayerId = leftId,
             RightPlayerId = rightId,
             WinnerSide = summary["winner_side"]?.GetValue<string>() ?? "",
+            ClientSide = InferClientSide(leftId, rightId, actions),
             Cards = cards,
             Actions = actions,
         };
     }
+
+    /// <summary>推断「官方客户端」那一方 —— 判据见 <see cref="ClientSide"/>。</summary>
+    public static Side InferClientSide(int leftId, int rightId, IReadOnlyList<WireAction> actions)
+    {
+        if (leftId < 0)
+        {
+            return Side.Right;
+        }
+
+        if (rightId < 0)
+        {
+            return Side.Left;
+        }
+
+        // 两边都不是 bot：录制方 = 有动作的那一方（实测单边日志右方只有 1 条空动作）。
+        int leftActions = actions.Count(a => a.PlayerId == leftId);
+        int rightActions = actions.Count(a => a.PlayerId == rightId);
+        return rightActions > leftActions ? Side.Right : Side.Left;
+    }
+
+    /// <summary>
+    /// 这一局某一方的 HQ 卡名（例如 `card_location_london`）。
+    ///
+    /// 用途：**配对采集快照与回放时的内容指纹**。
+    /// 以前是靠「快照的 act 有多大比例落在 actionId 里」配的，而 `actionId`
+    /// 每局都从 1 顺序编号 ⇒ 那个判据对任何足够长的局都成立，
+    /// 实测 7 对全配错（详见 `tools/BoardCompare/Program.cs` 里那段注释）。
+    ///
+    /// `CardId` 1 / 41 是固定的 HQ 槽位（快照与 `starting_data` 同一编号空间），
+    /// 所以按 id + side 取就是这一方的总部。
+    /// </summary>
+    public string HqName(Side side)
+        => Cards.FirstOrDefault(c => c.CardId == (side == Side.Left ? 1 : 41)
+                                     && c.Owner == side)?.Name
+           ?? Cards.FirstOrDefault(c => c.CardId == (side == Side.Left ? 1 : 41))?.Name
+           ?? "";
 
     public static bool TryParseLocation(string wire, out CardLocation location)
     {

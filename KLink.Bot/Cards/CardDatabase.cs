@@ -105,6 +105,36 @@ public sealed class CardDatabase
     /// <summary>2 字符卡组码 → 卡名。</summary>
     public IReadOnlyDictionary<string, string> DeckCodeIds { get; }
 
+    /// <summary>
+    /// 卡名 → 卡组码（<see cref="DeckCodeIds"/> 的反查）。
+    ///
+    /// 用途：`CS`（`XActionCardToDrawSelected`）动作的槽位 2 要填
+    /// **选中那张卡的 deck code**，不是 cardID（cardID 是对局内编号，
+    /// 而"开发"选中的是一张**卡池模板**，根本没有对局内编号）。
+    ///
+    /// 惰性构建：反查表只在真的选过牌时才用到，绝大多数对局用不上。
+    /// </summary>
+    private Dictionary<string, string>? _codeByName;
+
+    public string? DeckCodeFor(string cardName)
+    {
+        if (_codeByName is null)
+        {
+            var m = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (code, name) in DeckCodeIds)
+            {
+                if (!string.IsNullOrEmpty(name))
+                {
+                    m[name] = code;     // 同名多码时取第一个（实测无此情况）
+                }
+            }
+
+            _codeByName = m;
+        }
+
+        return _codeByName.GetValueOrDefault(cardName);
+    }
+
     public int Count => _byName.Count;
 
     public IReadOnlyCollection<CardDefinition> All => _byName.Values;
@@ -215,6 +245,20 @@ public sealed class CardDatabase
         {
             PropertyNameCaseInsensitive = false,
             ReadCommentHandling = JsonCommentHandling.Skip,
+            // ⚠️⚠️ 必须**显式**指定反射式解析器。
+            //
+            // 宿主可能把反射式序列化关掉 —— fyserver 就是：它 csproj 里写着
+            // `JsonSerializerIsReflectionEnabledByDefault=false`（为了 AOT 兼容）。
+            // 那个开关是**进程级**的，会连累所有 `JsonSerializer.Deserialize<T>`，
+            // 包括本类 ⇒ **内核整个加载失败**。
+            //
+            // 实测症状极具误导性：服务器照常启动（`ServerBotService` 是懒加载的），
+            // 只在真对局里表现成「bot 只会跳过回合」——
+            // 真正的异常藏在服务端日志的 `bot 内核加载失败` 那一行。
+            //
+            // 显式给 `DefaultJsonTypeInfoResolver` 只影响本类，
+            // 不改宿主的全局策略（fyserver 自己的那份仍走源生成）。
+            TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver(),
         };
 
         // ---- 数值（FModel 导出）----

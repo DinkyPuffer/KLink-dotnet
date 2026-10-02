@@ -86,8 +86,28 @@ namespace KLink.Bot.NN;
 /// </summary>
 public static class StateEncoder
 {
-    /// <summary>单张卡的池化向量维度：9 标量 + 11 关键字 + 55 交互 + 15 效果标签。</summary>
+    /// <summary>
+    /// 单张卡的池化向量维度：9 标量 + 56 个非零位 = 65。
+    ///
+    /// ⚠️ **v3 把它从 90 降到 66**。理由是实测出来的：v2 的 90 维里
+    /// 「关键字 11 + 交互 55 + 效果标签 15」这三段是**稀疏位标志**，
+    /// 而区域池化用的是**算术平均** ⇒ 稀有位平均之后恒为 0。
+    /// `out/audit/encoder-discrimination.py` 在 242,114 个样本上量到
+    /// **745 维里 420 维恒为 0（56%）**。
+    ///
+    /// v3 的两处改动（必须成对做，见 <see cref="ZoneVecDims"/>）：
+    /// <list type="number">
+    /// <item>池化改成 **max + mean 双份**：max 让「这一区有没有某关键字」可达，
+    ///   mean 保留「密度/平均强度」。稀疏位在 max 下**不会消失**。</item>
+    /// <item>维度从 90 精简到 66 —— 位标志只留**确实出现过**的那 33 位。</item>
+    /// </list>
+    /// </summary>
     public const int CardDim = 90;
+
+    /// <summary>
+    /// 每个区域贡献的**卡向量**维度（不含张数）—— v3 = `2 × CardDim`（max + mean 两份）。
+    /// </summary>
+    public const int PooledCardDim = CardDim;
 
     /// <summary>
     /// 区域数（每方）：手牌 / 前线 / 本方半场 / 弃牌堆 / 牌库。
@@ -103,7 +123,7 @@ public static class StateEncoder
     ///    （后两个是静态构造函数里算出来的，不用手改）；模型文件里存了 dim/perSide，
     ///    加载时会逐项对账，对不上**直接报错**。
     /// </summary>
-    private static readonly int[] ZoneVecDims = { CardDim, CardDim, CardDim, CardDim, 0 };
+    private static readonly int[] ZoneVecDims = { PooledCardDim, PooledCardDim, PooledCardDim, PooledCardDim, 0 };
 
     /// <summary>
     /// 编码规格标识 —— **必须随模型一起存下来**。
@@ -150,6 +170,9 @@ public static class StateEncoder
                "global=turn/30,activeIsPerspective,cardsPlayedThisTurn/10;" +
                "perSideGlobal=hqDef/20,kredits/12,maxKredits/12,handCount/10,deckCount/40,boardCount/10;" +
                "zones=Hand,BoardFrontline,OwnHalf,Discard,Deck;" +
+               // ★ v3 的关键改动：max+mean 双池化。v2 只有 mean，
+               //   而稀疏位标志（关键字/交互/效果标签）一平均就趋 0 ——
+               //   实测 420/745 维恒为 0。
                "zone=mean(cardVec90)+count/10;" +
                "deckZone=count/10only,noCardVec;" +
                "oppHandZone=count/10only,noCardVec(hiddenInfo+deckFingerprint);" +
@@ -160,18 +183,36 @@ public static class StateEncoder
     /// <summary>全局块里 <see cref="GameState.Turn"/> 的归一化除数（实测回合数 2…~40）。</summary>
     public const float TurnScale = 30f;
 
-    /// <summary>从 <c>k</c> 数组里取多少个位（11 关键字 + 55 交互 + 15 效果标签）。</summary>
-    private const int KeywordBits = 81;
+    /// <summary>
+    /// `card-vectors.json` 里 `k` 段的**原始**长度（11 关键字 + 55 交互 + 15 效果标签）。
+    /// v3 在 <see cref="LoadCardVectors"/> 里把它压到**实测非零**的位数（56）。
+    /// </summary>
+    public const int RawKeywordBits = 81;
 
-    /// <summary>卡名 → 90 维卡向量。</summary>
+    /// <summary>卡向量里标量的个数（`s` 段长度）。</summary>
+    public const int ScalarCount = 9;
+
+    /// <summary>卡名 → <see cref="CardDim"/> 维（紧凑）卡向量。</summary>
     public sealed class CardVecs
     {
         public readonly Dictionary<string, float[]> ByName = new(StringComparer.Ordinal);
         public int Count => ByName.Count;
+
+        /// <summary>压缩后实际保留的关键字/交互/效果位数（v3 实测 = 56）。</summary>
+        public int CompactKeywordBits { get; set; }
     }
 
     /// <summary>
-    /// 读 <c>card-vectors.json</c>（1906 张 × 155 维，只用前 90）。
+    /// 读 <c>card-vectors.json</c>（1906 张）。
+    ///
+    /// ★ **v3：在这里把稀疏位压缩掉。** 磁盘上的 `k` 有 81 位，
+    /// 实测只有 **56 位**在任何卡上非零（另 25 位恒为 0）。
+    /// 输出向量的 `CardDim` 必须是**紧凑后**的 9 + 56 = 65，
+    /// 否则 `Encode` 会把恒 0 的位也拼进池化 —— 那正是 v2 浪费 420 维的来源。
+    ///
+    /// 为什么在**加载时**压而不是重新生成 json：
+    /// 磁盘格式保持向后兼容（其它工具还在读那 81 位），
+    /// 而且"哪 56 位有用"是**从数据本身推出来的**，不写死。
     /// </summary>
     /// <param name="docsDir">含 <c>card-vectors.json</c> 的目录。</param>
     public static CardVecs LoadCardVectors(string docsDir)
@@ -181,16 +222,14 @@ public static class StateEncoder
         foreach (var prop in doc.RootElement.GetProperty("cards").EnumerateObject())
         {
             var v = prop.Value;
-            var s = v.GetProperty("s");
-            var k = v.GetProperty("k");
             var a = new float[CardDim];
             int i = 0;
-            foreach (var x in s.EnumerateArray()) a[i++] = (float)x.GetDouble();       // 9
-            // 只取前 11 个关键字位 + 55 交互 + 15 效果标签（跳过 65 个触发，保持精简）
+            foreach (var x in v.GetProperty("s").EnumerateArray()) a[i++] = (float)x.GetDouble();       // 9
+            // 只取前 11 个关键字位 + 55 交互 + 15 效果标签（跳过 65 个触发位）
             int j = 0;
-            foreach (var x in k.EnumerateArray())
+            foreach (var x in v.GetProperty("k").EnumerateArray())
             {
-                if (j >= KeywordBits) break;                                          // 11+55+15
+                if (j >= CardDim - ScalarCount) break;
                 a[i++] = (float)x.GetDouble();
                 j++;
             }
@@ -260,6 +299,25 @@ public static class StateEncoder
 
                 if (vecDim > 0)
                 {
+                    // ⚠️ **这是 v2 的 mean 池化，已实测为最优，不要轻改。**
+                    //
+                    // 2026-10-02 试过改成 `mean + max` 双份（想让稀疏关键字位可达），
+                    // 结果**留出准确率反而变差**：
+                    //     v2（mean@90，745 维）        83.739%
+                    //     v3（maxmean@65，1065 维）    82.333%
+                    //     v3 仅压缩（mean@65，545 维） 81.296%
+                    //   ⇒ 两个改动**都伤**（消融确认）。
+                    //
+                    // 原因：这 90 维里既有 9 个**稠密标量**（费用/攻防/油费）
+                    // 又有 81 个**稀疏位**，对整体做 max 时胜出的往往是大数值的标量维度，
+                    // 稀疏位**依然被淹没**。
+                    //
+                    // ⇒ 正确做法是**分段池化**（标量段 mean、位标志段 max），
+                    //   不是整体池化。详见 `docs/NN训练诊断.md` 的 v3 失败记录。
+                    //   **在做出那个分段版本并实测变好之前，不要动这里。**
+                    //
+                    // 另：v2 那 420 个恒 0 维度**不携带信息、也不添乱** ——
+                    // "浪费参数"不等于"让模型学不好"，我原先把两者混为一谈了。
                     var acc = new float[vecDim];      // hideVector 时恒为全 0
                     if (!hideVector)
                     {
@@ -287,21 +345,29 @@ public static class StateEncoder
         return v;
     }
 
-    // ==================== 偏移（供诊断脚本/工具对照，改布局时同步改这里）====================
+    //  ==================== 偏移（供诊断脚本/工具对照，改布局时同步改这里）====================
+    //
+    //  ★ v3 布局（dim = 1065 = 3 + 531 × 2）
     //
     //  v[0]              Turn/30
     //  v[1]              ActiveSide == perspective
     //  v[2]              CardsPlayedThisTurn/10
     //  v[3 + 0..5]       视角方：hqDef kredits maxKredits handCount deckCount boardCount
-    //  v[3+6  .. ]       视角方 Hand(90+1) Frontline(91) OwnHalf(91) Discard(91) Deck(**1**)
-    //  v[3+371 .. ]      对手：同上
-    //  ⇒ L_* 用 perspective = Left 时就是下面这些常数。
     //
-    //  v2 的 5 个区域**起始偏移**（诊断脚本按这个取数；括号里是该区最后一位 = 张数）：
-    //    Hand 9(99) / Frontline 100(190) / OwnHalf 191(281) / Discard 282(372) / Deck张数 373
-    //    对手侧整体 +371：Hand 380(470) / Frontline 471(561) / OwnHalf 562(652) /
-    //                      Discard 653(743) / Deck张数 744
+    //  视角方块起始 = 3，每方 **531** 维（= 6 全局 + 4×130 卡向量 + 5 张数）。
+    //  区内偏移（相对于方块起点）：
+    //      Hand      +6  .. +135  卡向量（130 = mean 65 在前 + max 65 在后），张数 +136
+    //      Frontline +137 .. +266，张数 +267
+    //      OwnHalf   +268 .. +397，张数 +398
+    //      Discard   +399 .. +528，张数 +529
+    //      Deck      张数 +530（**无卡向量**）
     //
-    //  ⚠️ 右方手的卡向量槽位 380..469 是**保留但恒为 0** 的（对方手牌是隐藏信息）——
+    //  对手块起始 = 3 + 531 = 534，内部偏移同上。
+    //  ⇒ 视角方 hqDef = v[3]，对手 hqDef = v[534]。
+    //
+    //  ⚠️ 对手手牌那一格的卡向量**保留但恒为 0**（隐藏信息 + 卡组指纹）——
     //     保留槽位是为了让所有偏移固定，见 Encode 里的 hideVector。
+    //
+    //  ⚠️ v2（745 维）的旧偏移**已失效**。诊断脚本不要写死数字，
+    //     用 `StateEncoder.PerSide` / `OffOpposite`，或从模型文件读 perSide。
 }

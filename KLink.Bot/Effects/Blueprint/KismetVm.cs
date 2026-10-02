@@ -17,7 +17,13 @@ namespace KLink.Bot.Effects.Blueprint;
 /// </summary>
 public sealed class KismetVm
 {
-    /// <summary>单次执行的步数上限 —— 防止字节码异常导致死循环。</summary>
+    /// <summary>
+    /// 单次执行的步数**下限/基线** —— 防止字节码异常导致死循环。
+    ///
+    /// ⚠️ 事件程序实际用的不是这个常数，而是 <see cref="EventStepBudget"/> 算出来的
+    /// 「卡池规模 × 每张卡步数」预算（下限就是本常数）。2026-10-01 之前事件程序
+    /// **写死**用这个 5000，`card_event_atlantic_convoy` 因此被硬截断（见下面的长注释）。
+    /// </summary>
     public const int MaxStepsPerProgram = 5000;
 
     /// <summary>
@@ -28,10 +34,59 @@ public sealed class KismetVm
     /// 第 256–457 行），每张卡一轮循环体 ~8 步 × 2021 张卡 ≈ **16000 步**，
     /// 用 <see cref="MaxStepsPerProgram"/> 的 5000 会在第 5000 步被硬截断 ——
     /// 表现是"候选表恒为空、而且**不报任何错**"（`cards` 那一步根本没走到）。
-    /// 事件程序仍然用 5000：那条路上从来没有这么长的循环，
-    /// 放宽它只会削弱"控制流切片不对"这个死循环哨兵。
+    ///
+    /// ⚠️ 2026-10-01 更正：下面那句「事件程序仍然用 5000：那条路上从来没有这么长的循环」
+    /// **是错的**，已被 `card_event_atlantic_convoy` 证伪（同一个"扫全卡池"形状
+    /// 直接写在它的 `OnPlayedFromHand` 里，不在局部函数里）——
+    /// 所以事件程序现在也走动态预算 <see cref="EventStepBudget"/>。
     /// </summary>
     public const int MaxStepsPerLocalProgram = 400_000;
+
+    /// <summary>
+    /// 扫**一张卡池模板**最多花多少步 —— <see cref="EventStepBudget"/> 的乘数。
+    ///
+    /// 实测 `card_event_atlantic_convoy`（IR i=15..384 的 ForEach，对局 508065 #36）
+    /// 的循环体是 **13 步/张**：
+    /// <code>
+    /// i=20  Array_Get            i=79   EnumCompareFaction    i=131  set CmpSuccess
+    /// i=162 jumpIfNot            i=176  popFlow               i=177  Add_IntInt
+    /// i=219 写回计数             i=246  Array_Length          i=305  Less_IntInt
+    /// i=343 jumpIfNot            i=357  写 idx                i=384  jump
+    /// </code>
+    /// 命中阵营分支再多 6 步（`Array_Get` / `IsUnit` / `getAndDecryptKredit` /
+    /// `LessEqual` / `BooleanAND` / `popFlowIfNot` / `Array_Add`）。
+    ///
+    /// 取 52 = 13 × 4：留 4 倍余量，让"以后往过滤条件里再加几个判据"不会立刻又撞墙；
+    /// 同时它仍然是一个**乘数**而不是把上限拍成无穷 —— 真死循环照样会被
+    /// <see cref="MaxStepsHardCap"/> 拦住。
+    ///
+    /// ## 影响面（2026-10-01 全 IR 静态扫，见 `out/audit/atlantic-convoy-evidence.py`）
+    ///
+    /// 全 IR 里 **11 个事件程序**含"扫全卡池"循环，静态估计的动态步数都超过旧的 5000：
+    /// <code>
+    /// card_event_allied_research_effort  ≈103k   card_unit_kokuras_sword        ≈93k
+    /// card_event_strong_bond             ≈89k    card_event_mountain_offense    ≈75k
+    /// card_event_experimental_flight     ≈75k    card_event_atlantic_convoy     ≈67k
+    /// card_unit_13th_rifle_regiment      ≈65k    card_unit_c47_skytrain         ≈65k
+    /// card_event_partnership             ≈61k    card_unit_ki_27_nate           ≈61k
+    /// card_unit_p37los                   ≈26k
+    /// </code>
+    /// （静态估计把整个环体都算成"每张卡都执行"，是**高估**；
+    /// `atlantic_convoy` 实测 13 步/张 ≈ 28k。但排序和"会不会撞墙"是对的。）
+    /// 这 11 张里**只有 `atlantic_convoy` 在手上这 3 局回放里真的被打出来过** ——
+    /// 其余 10 张只是还没被抽到，不是没问题。
+    /// </summary>
+    public const int StepsPerPoolCard = 52;
+
+    /// <summary>
+    /// 步数**绝对硬上限** —— 防真死循环（那是这套预算存在的唯一理由）。
+    ///
+    /// 取值依据：当前卡池 2021 张 × <see cref="StepsPerPoolCard"/>(52) ≈ **105,000**；
+    /// 就算卡池涨到 8,000 张也只要 ~416,000。取 1,000,000 ≈ 对 8,000 张卡池留 2.4× 余量，
+    /// 而对"控制流切片错导致原地打转"这种真死循环，它在毫秒级就会停下并**报警**
+    /// （见 <see cref="RunCore"/> 撞上限那段：会写进 `State.UnimplementedCalls`）。
+    /// </summary>
+    public const int MaxStepsHardCap = 1_000_000;
 
     /// <summary>
     /// 诊断用：非 null 时记录每一次原语调用（`函数名(卡名#cardID)`）。
@@ -58,7 +113,39 @@ public sealed class KismetVm
     public Dictionary<string, int> UnsupportedOps { get; } = new(StringComparer.Ordinal);
 
     /// <summary>执行一个事件程序。</summary>
-    public void Run(KismetProgram program, EffectContext ctx) => RunCore(program, ctx, null, null);
+    public void Run(KismetProgram program, EffectContext ctx)
+        => RunCore(program, ctx, null, null, null, EventStepBudget(ctx));
+
+    /// <summary>
+    /// 事件程序的步数预算 = <c>max(基线, 卡池规模 × 每张卡步数)</c>，再夹到硬上限。
+    ///
+    /// ## 为什么必须动态算（而不是写死一个更大的常数）
+    ///
+    /// `card_event_atlantic_convoy`（对局 `508065` 第 36 号动作）的 `OnPlayedFromHand`
+    /// 里有**一条和 `GetChooseSpawnCards` 一模一样的"扫全卡池再过滤"循环**
+    /// （IR i=15..384；判据「USA + IsUnit + 总费 ≤ 3」）。旧实现给事件程序写死 5000 步，
+    /// 而 2021 张卡 × 13 步 ≈ **28,000 步**才跑得完 ⇒ 程序在第 5000 步被静默截断，
+    /// 断点落在第 363 张卡（`card_event_industrial_might`）—— 那里全是
+    /// `card_display_*` / `card_brawl_*` / `card_event_*`（指令，`IsUnit` 恒假）
+    /// ⇒ `possibleCards` **恒空** ⇒ `Array_IsNotEmpty` 为假
+    /// ⇒ i=549 `SpawnCardOnBattlefield` 与 i=758 `SpawnCardInHandBySide`
+    /// **两条分支一次都没进** ⇒ 整张卡"什么都不做"。
+    ///
+    /// 写死一个更大的魔数只是把墙往后推（卡池会变大、过滤条件会变多）；
+    /// 按"卡池 × 单卡步数"算，则墙**跟着卡池一起长**，而
+    /// <see cref="MaxStepsHardCap"/> 保证真死循环仍然会被拦。
+    /// </summary>
+    public static int EventStepBudget(EffectContext ctx)
+    {
+        int pool = ctx.State.Database.Count;
+        long want = (long)pool * StepsPerPoolCard;
+        if (want < MaxStepsPerProgram)
+        {
+            return MaxStepsPerProgram;
+        }
+
+        return (int)Math.Min(MaxStepsHardCap, want);
+    }
 
     /// <summary>
     /// 执行一张卡**自己的局部函数**（例如 <c>GetPlayFromHandDamage</c>），
@@ -99,8 +186,15 @@ public sealed class KismetVm
     private object? RunCore(KismetProgram program, EffectContext ctx,
                             IReadOnlyDictionary<string, object?>? seed, string? returnVar,
                             IReadOnlyList<string>? returnVars = null,
-                            int maxSteps = MaxStepsPerProgram)
+                            int maxSteps = 0)
     {
+        // `maxSteps <= 0` = 调用方没给（只有事件程序走这条）：按卡池规模算预算。
+        // 局部函数两个入口都显式传 `MaxStepsPerLocalProgram`，不受影响。
+        if (maxSteps <= 0)
+        {
+            maxSteps = EventStepBudget(ctx);
+        }
+
         // 按 StatementIndex 建索引，便于按 target 跳转
         var byIndex = new Dictionary<int, int>(program.Steps.Count);
         for (int i = 0; i < program.Steps.Count; i++)
@@ -200,16 +294,35 @@ public sealed class KismetVm
                         // MakeArray 节点：把若干值组装成一个数组存进变量
                         if (!string.IsNullOrEmpty(step.DestinationVar))
                         {
-                            var items = new List<CardInstance>();
-                            foreach (var a in step.Args)
-                            {
-                                if (Eval(a, frame, ctx) is CardInstance c)
-                                {
-                                    items.Add(c);
-                                }
-                            }
+                            var evaluated = step.Args.Select(a => Eval(a, frame, ctx)).ToList();
 
-                            frame.Set(step.DestinationVar, items);
+                            // ⚠️ 旧实现只收 `CardInstance`（`if (Eval(...) is CardInstance c)`），
+                            //    于是**整数 cardID 元素被静默丢掉**。而 IR 里 MakeArray 的元素
+                            //    经常就是 ID：形状是 `{"var":"cardID","ctx":{"var":"…randomCard"}}`
+                            //    （`GetMember(卡,"cardID")` 求值成 int）。
+                            //    实测：`card_event_high_altitude_bombing`（卡面
+                            //    「Destroy two random enemy units.」）的 `i=496 setArray`
+                            //    两个元素**都是** `MEMBER(cardID)` ⇒ 组出来的数组是空的 ⇒
+                            //    下游 `DestroyMultipleCards` 一张都处理不到 ⇒ 状态零变化
+                            //    （`out/audit/smoke-all-cards.tsv`：该卡两个用例 kind=D changed=0，
+                            //      但 `called` 里确实有 `DestroyMultipleCards` —— 典型的 D2）。
+                            //    全卡池 182 个 setArray 站点里，元素含
+                            //    `MEMBER(cardID)`/`VAR(cardID)`/`INT` 的有 20 个。
+                            //
+                            //    兼容性（**严格增量，不动老路径**）：
+                            //      · 有 CardInstance 元素、或本来就是空数组 → 照旧产出
+                            //        `List<CardInstance>`（与旧实现逐位一致）；
+                            //      · **一个 CardInstance 都没有** → 原样保留求值结果，
+                            //        由 `CardApi.EvalList`（认任意 IList）+ `AsCardOrId`
+                            //        （卡实例 ↔ 整数 ID 互通）消费。
+                            if (evaluated.Count == 0 || evaluated.Any(v => v is CardInstance))
+                            {
+                                frame.Set(step.DestinationVar, evaluated.OfType<CardInstance>().ToList());
+                            }
+                            else
+                            {
+                                frame.Set(step.DestinationVar, evaluated);
+                            }
                         }
 
                         pc++;
@@ -309,8 +422,29 @@ public sealed class KismetVm
             if (steps >= maxSteps)
             {
                 StepLimitHits++;
-                string key = $"<step-limit:{program.Entry}>";
+
+                // ⚠️⚠️ 撞上限必须**可观测**，不能静默（2026-10-01 补）。
+                //
+                // 旧实现只写 `UnsupportedOps`，而审计 ⑥ 段读的是
+                // `GameState.UnimplementedCalls` —— 于是"程序被截断"这件事
+                // **在审计里一个字都看不到**。`card_event_atlantic_convoy`
+                // （对局 508065 #36）就是这么"什么都不做"了好几轮的：
+                // 它扫 2021 张卡池要 ~28,000 步，在第 5000 步被截断，
+                // `possibleCards` 恒空，两条生成分支一次都没进，
+                // 而所有诊断输出里**没有任何一条**指向这里。
+                //
+                // 现在同时写进 `UnimplementedCalls`（审计 ⑥ 直接报），
+                // 带上卡名 + 实际步数/预算 —— 下次再撞墙，
+                // 它会是一条"审计报出来的数字"，而不是"某张卡神秘失效"。
+                //
+                // ⚠️ 不写 `program.Entry`：事件程序的入口被
+                // `KismetLibrary.BuildEntryProgram` 加了一条调度跳板，
+                // 所有卡的 `Entry` 都是同一个 `-1000000`，写出来没有信息量。
+                // 卡名才是有用的那一半。
+                string who = ctx.Self?.Definition.Name ?? "<无主>";
+                string key = $"<step-limit:{who}>";
                 UnsupportedOps[key] = UnsupportedOps.GetValueOrDefault(key) + 1;
+                _api.NotifyUnimplemented($"<vm-step-limit:{who}:{steps}/{maxSteps}>");
             }
 
             return Capture();
@@ -758,6 +892,42 @@ public sealed class KismetVm
             case "Concat_StrStr": return string.Concat(a?.ToString(), b?.ToString());
             case "Conv_NameToString": return a?.ToString() ?? "";
             case "GetEnumeratorUserFriendlyName": return a?.ToString() ?? "";
+
+            // ---- /Script/kards.FunctionLibrary ----
+            //
+            // ⚠️ 这一族**不是** KismetMathLibrary 的数学节点，而是游戏原生 C++ 函数；
+            //    它们以 `CallMath` 形状出现（`ContextClass = /Script/kards.FunctionLibrary`），
+            //    所以只能在这里实现 —— 放进 `CardApiDispatch` 永远不会被调用到，
+            //    因为 `Eval` 先判 `expr.Math` 就转进本函数了（见 `Eval` 的分支顺序）。
+            //
+            // `GetStaticCard(Name cardName)` —— 按卡名取**卡池模板卡**。
+            // 实测实参恒为 1 个 `PinCategory = Name`：
+            //   `NameConst:"card_sideeffect_holder_left"`
+            //   `LocalVariable cardName` / `InstanceVariable CardName`
+            //   `LocalVariable CallFunc_GetCardName_cardName`
+            //   `Context{...}._card` / `._cardFromID`（结构体字段，`ToString()` 后就是卡名）
+            //
+            // 返回 `TemplateInstance`（`CardId = 0`、`Location = NotAvailable`）——
+            // 和 `GetAllActiveStaticCards()` 返回的池子是同一种东西，
+            // 这样下游谓词（`IsUnit` / faction 比较 / 读 tag）行为才一致。
+            case "GetStaticCard":
+                {
+                    string? cardName = a?.ToString();
+                    if (string.IsNullOrEmpty(cardName))
+                    {
+                        return null;
+                    }
+
+                    // 有的调用点传的是对象（`Context{card}._card`），
+                    // 那种情况下 `ToString()` 未必是卡名 —— 先按名字找，找不到再按对象取。
+                    if (a is CardInstance direct)
+                    {
+                        return direct;
+                    }
+
+                    var def = ctx.State.Database.Find(cardName);
+                    return def is null ? null : KLink.Bot.Effects.CardApi.TemplateInstance(def, ctx.Controller);
+                }
             default:
                 UnimplementedCalls[$"math:{fn}"] = UnimplementedCalls.GetValueOrDefault($"math:{fn}") + 1;
                 _api.NotifyUnimplemented($"math:{fn}");
@@ -791,6 +961,20 @@ public sealed class KismetVm
         return member switch
         {
             "side" => (int)card.Owner,
+            // ★ `originalSide` —— 「这张卡**原本**属于哪一方」，与 `side`（当前归属）分开。
+            //   IR 里 11 张卡 / 16 个调用点读它，全是 `<某张卡>.originalSide`，
+            //   典型用法就是 `card_event_fog_of_war` i=95
+            //   `SpawnCardInDeckBySide(originalSide@targetCard, name@targetCard, …)`
+            //   （卡面：「Put two copies on top of **owner's** deck.」）。
+            //   不认这个成员 ⇒ 读成 null ⇒ `DoSpawnInDeck` 的 `SideArg` 退回
+            //   `c.Controller`（**施法者**）⇒ 复制品塞进了**对面**的牌库。
+            //   实测对局 773639 `#29 t7`：人类用雾战移除 bot 的 `card_unit_1st_airborne#60`，
+            //   两张复制品应当进 **Right** 牌库，旧实现进了 Left。
+            //
+            //   本内核没有建模「控制权转移」（`Side.Owner` 就是归属），
+            //   所以 `originalSide` 与 `side` 同值 —— 这是近似，不是猜：两者
+            //   在没有偷取/转换的对局里本来就相等。
+            "originalSide" => (int)card.Owner,
             "faction" => card.Definition.FactionId,
             "name" => card.Name,
             "cardID" => card.CardId,
@@ -924,7 +1108,26 @@ public sealed class KismetVm
             // 实测需要的有 `enterPlayOnTurn`（`card_event_committed_crew` 用它判
             // 「这张牌是不是本回合打出的」）、`faction`、`attack` 等；
             // 见 KismetVm.GetMember 的成员表。
-            return GetMember(_ctx.Self, name);
+            if (GetMember(_ctx.Self, name) is { } member)
+            {
+                return member;
+            }
+
+            // ⚠️ 最后一层兜底：**蓝图 CDO 上的成员变量默认值**。
+            //    为什么必须有它：`gen-kismet-ir.py` 只编字节码，**不编 CDO 默认值** ——
+            //    像 `card_event_firestorm_skirm` 的 `damageToDeal`（CDO 里是 "2"）
+            //    在 IR 里只以裸读 `{"var":"damageToDeal"}` 出现，本函数返回 null
+            //    ⇒ `IntArg` 读成 0 ⇒ `DamageMultipleCards(cards, 0, …)` 一张都打不动。
+            //    对照证据：同族的 `card_event_wave_after_wave` **自己** `set damageToDeal`
+            //    （i=557 设 4 / i=660 设 2），它是那一族里唯一跑得出状态变化的。
+            //    详见 `CardVarDefaults` 的注释（含 CDO 原文与全卡池扫描判据）。
+            if (_ctx.Self is { } selfCard
+                && Cards.CardVarDefaults.TryGet(selfCard.Definition.Name, name, out var def))
+            {
+                return def;
+            }
+
+            return null;
         }
 
         /// <summary>

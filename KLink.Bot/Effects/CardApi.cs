@@ -628,13 +628,29 @@ public sealed partial class CardApi
     /// <c>BooleanAND(Not(CustomName1HasAttribute("StopDestructionEffect")), card.hasDestruction)</c>；
     /// 另有 si=1728 的一条并列分支 <c>HasCustomAbility("destruction")</c>（同一门的另一份实现）。
     ///
-    /// ⚠️ **没做** <c>StopDestructionEffect</c> 那一半：它是 `CustomName1` 属性
-    /// （`si=3539 CustomName1Add("StopDestructionEffect")`），而 `CustomName1*` 三件套
-    /// 内核一个都没进派发表（审计 §6 的 P1#10，~60 张卡）。没有写方就没有读方的意义，
-    /// 这里不假装判过 —— 门只取剩下两条。
+    /// ✅ **2026-10-02：`StopDestructionEffect` 那一半补上了。**
+    /// 以前这里是 TODO，理由是「`CustomName1*` 三件套内核一个都没进派发表（没有写方）」。
+    /// 现在 `CustomName1Add/Remove/HasAttribute` 都进了派发表
+    /// （<c>CardApiDispatch.cs</c>，语义出处 `ref/kards-sim/KardsSim/Bridge/EngineHost.cs:2160-2182`），
+    /// 写方有了 ⇒ 读方必须一起补，否则那两个写方（`card_event_patrol` i=10、
+    /// `card_event_usa_promo2` i=414）**写了也没人看**。
+    /// 读的是同一份存储（<see cref="CustomNameHasAttribute"/>），所以两边不会漂。
     /// </summary>
     public bool ShouldTriggerDestructionEffect(CardInstance card)
-        => card.Keywords.Contains(Keyword.Destruction) || HasCustomAbility(card, "destruction");
+        => !CustomNameHasAttribute(card, "customName1", "StopDestructionEffect")
+           && (card.Keywords.Contains(Keyword.Destruction) || HasCustomAbility(card, "destruction"));
+
+    /// <summary>
+    /// `CustomName{1,2}HasAttribute(标记)` 的**静态读法**（引擎内部用，不走派发表）。
+    ///
+    /// 存储键与派发表里的 <c>SuffixAdd</c>/<c>SuffixHas</c> 完全一致
+    /// （<c>customName1</c> / <c>customName2</c>，值是用逗号分隔的标记串）——
+    /// 两处**必须**共用同一个读法，否则「谁写了、谁没看见」这种漂移没人能查。
+    /// </summary>
+    public static bool CustomNameHasAttribute(CardInstance card, string set, string attribute)
+        => card.CustomJson.TryGetValue(set, out string? v)
+           && v.Split(',', StringSplitOptions.RemoveEmptyEntries)
+               .Contains(attribute, StringComparer.Ordinal);
 
     /// <summary>诊断用：非 null 时记录每一次实际派发（`事件名 → 卡名#ID`）。</summary>
     public List<string>? TriggerTrace { get; set; }
@@ -947,6 +963,11 @@ public sealed partial class CardApi
     /// （si=3363 防守方受伤、si=3451 攻击方反击受伤），
     /// 而 `ApplyDamageToCard` si=1808 / `ApplyDamageToMultipleCards` si=4933
     /// 都是 `False` —— 也就是"效果伤害"。
+    ///
+    /// ⚠️ 这个标志同时是**重甲减伤的唯一判据**（`MatchEngine.ApplyDamage`）：
+    /// 蓝图里重甲只长在 `CalculateDamageDealt` 里，而那个函数只被攻击链调用；
+    /// 效果伤害走裸减的 `ApplyDamageToCard`（`g.cs:1053-1057`）。
+    /// 漏传它 = 这笔效果伤害被重甲白白吃掉几点。
     /// </param>
     /// <param name="counterDamage">是不是反击伤害（`ExecuteAttackCard` si=3451 传 True）。</param>
     /// <param name="fromFight">
@@ -978,7 +999,55 @@ public sealed partial class CardApi
                                                   isCombatDamage, fromFight, counterDamage);
         }
 
-        int applied = _engine.ApplyDamage(target, amount, source);
+        ApplyCalculatedDamage(target, amount, source, isCombatDamage, counterDamage, isRedirected);
+    }
+
+    /// <summary>
+    /// 「伤害值**已经**算好了，直接落地」—— 只给 <c>MakeCardsFight</c>（互斗）用。
+    ///
+    /// ## 为什么必须把它从 <see cref="DealDamage"/> 里拆出来（2026-10-02）
+    ///
+    /// 蓝图 `BP_CardFunctions::MakeCardsFight`（`ref/kards-sim/KardsSim/Generated/
+    /// BP_CardFunctions.g.cs:25907-26040`）的执行序是**先算完两个方向、再依次落地**：
+    /// <code>
+    /// si=6A   _damage_to_enemy_unit = getTotalAttack(unitThisSide)      ← 攻击值快照
+    /// si=AE   _damage_to_my_unit    = getTotalAttack(unitOppositeSide)  ← 也在落地前
+    /// si=12F  ExecuteOnDealDamageAddDamage(a→b, …, False, True, False)  ← 方向 1 的修正链
+    /// si=164  ExecuteOnDealDamageAddDamageAfterCalc(…)
+    /// si=1E8  ExecuteOnDealDamageAddDamage(b→a, …, False, True, False)  ← 方向 2 的修正链
+    /// si=21D  ExecuteOnDealDamageAddDamageAfterCalc(…)
+    /// si=26E  ApplyDamageToCard(b ← a, _final_damage_to_enemy_unit, False, False)   ← 才开始扣血
+    /// si=299  ApplyDamageToCard(a ← b, _final_damage_to_my_unit,    False, True)
+    /// </code>
+    /// 也就是说：**方向 2 的伤害修正链看到的是"两笔伤害都没落地"的场面**。
+    /// 内核的 <see cref="DealDamage"/> 把「修正链 + 落地」焊在一起，连调两次会让
+    /// 方向 2 的修正者（例如 `OnOtherCardDealDamageAddDamage` 里数友方单位的那种）
+    /// 看见方向 1 已经打死的尸体 ⇒ 数值可能与客户端不同。
+    ///
+    /// 所以这里只做**相位拆分**：修正链仍走
+    /// <see cref="ExecuteOnDealDamageAddDamage"/>（同一个漏斗，重甲（仅战斗伤害）/ 免疫 /
+    /// `OnCardDealDamage_ModifyDamageDealt` / `OnOtherCardDealDamageAddDamage` /
+    /// `ZActionDamageCard` / `OnReceiveDamage` / `OnCardDealDamage` 一条不少），
+    /// **没有第二套伤害结算**。
+    ///
+    /// ⚠️ `GetPassiveDefenseBuff`（被动防 buff）内核**没有实现**，也不打算在这里顶替：
+    ///    它在蓝图里与重甲同块，但判据是另一个标志 `applyBeforeAttackBuffs`，
+    ///    而真实攻击结算的两个调用点都传 False（证据见 `MatchEngine.ApplyDamage`）。
+    ///
+    /// ⚠️ 本方法**故意不加** `amount &gt; 0` 门 —— <see cref="DealDamage"/> 原先就没有
+    /// 在修正链之后再判一次，加门会改变既有调用方的行为（修正链夹到 0 时那笔
+    /// `ZActionDamageCard` 现在会发、加门后就不发了）。是否跳过零伤害由调用方决定。
+    /// </summary>
+    internal void ApplyCalculatedDamage(CardInstance target, int amount, CardInstance? source,
+                                        bool isCombatDamage, bool counterDamage, bool isRedirected)
+    {
+        // ⚠️ `isCombatDamage` 必须传下去：重甲减伤**只对战斗伤害生效**，
+        //    判据与证据链见 `MatchEngine.ApplyDamage` 里那段长注释
+        //    （全库 `getTotalHeavyArmor` 的减伤只长在 `CalculateDamageDealt` 里，
+        //      而它只被攻击链调用；效果伤害走的是裸减的 `ApplyDamageToCard`）。
+        //    `Attack` 传 true（`MatchEngine.cs:1569` 主伤害 / `:1572` 反击），
+        //    `DamageCard` / `DamageMultipleCards` / `MakeCardsFight` 都传 false。
+        int applied = _engine.ApplyDamage(target, amount, source, isCombatDamage: isCombatDamage);
 
         // ⚠️ 2026-09-30：`damage` 填的是**修正后**的值、`oldDefense` 填的是**结算前**的防御。
         //    证据（`out/bp-cardfn.json` → `ApplyDamageToCard`，123 条语句）：
@@ -1290,7 +1359,8 @@ public sealed partial class CardApi
         ChangeDefense(card, bonus, card);
     }
 
-    public void ChangeAttack(CardInstance target, int delta, CardInstance? source, int duration = -1)
+    public void ChangeAttack(CardInstance target, int delta, CardInstance? source, int duration = -1,
+                             bool temporary = false)
     {
         if (!target.IsAlive || delta == 0)
         {
@@ -1300,7 +1370,7 @@ public sealed partial class CardApi
         target.Attack = Math.Max(0, target.Attack + delta);
         if (source is not null)
         {
-            var buff = GetOrCreateBuff(target, source.CardId);
+            var buff = GetOrCreateBuff(target, source.CardId, temporary);
             buff.Attack += delta;
             buff.Duration = duration;
         }
@@ -1326,7 +1396,7 @@ public sealed partial class CardApi
             });
     }
 
-    public void ChangeDefense(CardInstance target, int delta, CardInstance? source)
+    public void ChangeDefense(CardInstance target, int delta, CardInstance? source, bool temporary = false)
     {
         if (!target.IsAlive || delta == 0)
         {
@@ -1335,9 +1405,10 @@ public sealed partial class CardApi
 
         target.Defense += delta;
         target.MaxDefense = Math.Max(target.MaxDefense, target.Defense);
+
         if (source is not null)
         {
-            GetOrCreateBuff(target, source.CardId).Defense += delta;
+            GetOrCreateBuff(target, source.CardId, temporary).Defense += delta;
         }
 
         _engine.FireSubAction("ZActionGainDefense", new[]
@@ -1412,6 +1483,101 @@ public sealed partial class CardApi
             ActionValue2.Int("instigatorID", instigatorId),
             ActionValue2.Int("amount", delta),
         });
+    }
+
+    /// <summary>
+    /// 「+N 攻击，直到回合结束」（`BP_CardFunctions.AddAttackUntilEndOfTurn`，8 条语句）。
+    ///
+    /// 蓝图逐字：
+    /// <code>
+    /// si=0  IsValid(card)                    ; si=1 JumpIfNot → 191 return
+    /// si=2  NotEqual_IntInt(attackToAdd, 0)  ; si=3 JumpIfNot → 191 return
+    /// si=4  ChangeAttack(card, instigatorID, attackToAdd, changeType=0, silent=False, out)
+    /// si=5  GameStateRef.AddBuffsToRemoveEndOfTurn(0 /*buffType*/, instigatorID)
+    /// </code>
+    ///
+    /// 实参形状（6 个独立调用点互证：`defiant_mk_i` / `plan_d` / `blitzkrieg` /
+    /// `rally` / `armored_car_home` / `old_hares`，全部是
+    /// `(卡, this.cardID, IntConst:N)`）⇒ `[0]` 目标卡、`[1]` 来源、`[2]` 加多少。
+    ///
+    /// `changeType=0` 是 `EChangeType::tempBuffGive` ⇒ 登记为临时 buff，
+    /// 在本方回合结束时由 <see cref="RemoveTemporaryBuffs"/> 撤掉。
+    /// </summary>
+    public void AddAttackUntilEndOfTurn(CardInstance? target, CardInstance? source, int attackToAdd)
+    {
+        if (target is null || !target.IsAlive || attackToAdd == 0)
+        {
+            return;
+        }
+
+        // 没有来源就不再登记 buff —— 否则加的值没有任何东西能撤回来。
+        // 蓝图的 instigatorID 永远是调用者自己，所以这一支只在异常数据下才走。
+        var instigator = source ?? target;
+        ChangeAttack(target, attackToAdd, instigator, temporary: true);
+    }
+
+    /// <summary>
+    /// 撤掉本回合的临时修正 —— `BP_CardFunctions.RemoveBuffsEndOfTurn` 的等价物
+    /// （71 条语句：遍历 buffType → instigatorArray → `GetCardFromID` → `RemoveTheBuff`）。
+    ///
+    /// 蓝图把「待清理」记在 `GameStateRef` 的一张 map 上
+    /// （key = `ECardBuffTypes`，value = 带 `CardIDs` 数组的结构），
+    /// 内核用 <see cref="CardBuff.Temporary"/> 直接标在 buff 上 —— 两者等价，
+    /// 因为清理的粒度就是「(目标卡, 来源) 这一个 buff」。
+    ///
+    /// 调用点：`MatchEngine.EndTurn` 里 `OnEndOfTurn` 触发**之后**、回合数递增之前。
+    /// 顺序有依据 —— 蓝图 `ExecuteEndOfTurnEvents` 先广播 `OnEndOfTurn`，
+    /// 卡自己的收尾逻辑跑完才轮到统一清理。
+    /// </summary>
+    public void RemoveTemporaryBuffs()
+    {
+        // AllCards 是物化列表（`_byCardId.Values.OrderBy(...).ToList()`），循环里删 buff 安全。
+        foreach (var card in State.AllCards)
+        {
+            // 键里已经带了 `Temporary`，所以这里只挑临时那一半 ——
+            // 同一来源的**永久** buff 是另一个槽位，不会被误删。
+            var doomed = card.BuffsBySource
+                .Where(kv => kv.Key.Temporary)
+                .Select(kv => (Key: kv.Key, Buff: kv.Value))
+                .ToList();
+
+            if (doomed.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (var (key, buff) in doomed)
+            {
+                card.BuffsBySource.Remove(key);
+
+                // ⚠️ 必须显式做**逆运算**，不能靠 `RecalculateStats()` ——
+                //    那个函数只重算费用/行动费/重甲（见它的注释：「落点：KreditCost、
+                //    OperationCost、重甲关键字」），**不动 Attack/Defense**。
+                //    而 `ChangeAttack`/`ChangeDefense` 是直接写 `target.Attack += delta`，
+                //    所以撤销也必须是对称的 `-=`，否则「+N 直到回合结束」会永远留着。
+                if (buff.Attack != 0)
+                {
+                    card.Attack = Math.Max(0, card.Attack - buff.Attack);
+                }
+
+                if (buff.Defense != 0)
+                {
+                    card.Defense -= buff.Defense;
+                    // 临时加的防御撤掉后，MaxDefense 要跟着回落，否则 `IsDamaged`
+                    // （`Defense < MaxDefense`）会永远为真。
+                    card.MaxDefense = Math.Max(card.Defense, card.Definition.Defense);
+                }
+
+                _engine.FireSubAction("ZActionGainAttack", new[]
+                {
+                    ActionValue2.Int("instigatorID", key.SourceCardId),
+                    ActionValue2.Int("gained", -buff.Attack),
+                    ActionValue2.Int("newAttackValue", card.Attack),
+                });
+            }
+
+            card.RecalculateStats();
+        }
     }
 
     /// <summary>增加 kredit 槽位上上限并回满（ZActionChangeKredits 的常见用法）。</summary>
@@ -1516,6 +1682,33 @@ public sealed partial class CardApi
             : State.Cards(side, where).Where(c => c != card).Select(c => c.LocationNumber).DefaultIfEmpty(-1).Max() + 1;
         State.Move(card, where, slot);
 
+        // ★★ 直接生成到**前线**时必须**显式**重算前线归属（2026-10-02 补）。
+        //
+        // 为什么这里必须显式写一句：`State.Create` 已经把 `Location` 设成 `where` 了，
+        // 紧接着的 `State.Move(card, where, slot)` 是**同区移动** ⇒ `GameState.Move`
+        // 里 `moved == false` ⇒ **换区钩子（`MatchEngine.FireLocationMoved`）不发**
+        // ⇒ `FrontlineOwner` 不会更新。
+        //
+        // 后果：一张卡把单位**直接生成到空前线**之后，我们这边 `FrontlineOwner`
+        // 仍是 `NotAvailable` ⇒ 对面随后可以推进到一个**已经被占**的前线
+        // （互斥门形同虚设）。`SpawnCardInFrontline`（108 调用点 / 29 张卡）
+        // 走的正是这条路。
+        //
+        // 蓝图也是**显式**补这一句的，不是靠换区钩子 ——
+        // 出处 `ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs`
+        // → `SpawnCardToBoard`（本文件 `SpawnOnBattlefield` 对应物）：
+        // <code>
+        //   L_03AE  ExecuteOnCardLocationMoved(spawnedID, 0, location, False, 12)
+        //   L_03D3  EqualEqual_ByteByte(location, 7)
+        //   L_03F2  JumpIfNot L_0417                 ; 不是前线 ⇒ 跳过
+        //   L_0400  UpdateFrontlineIfNeeded(spawnedID)   ← ★ 就是这一句
+        // </code>
+        // `SpawnMultipleCardsOnBattlefield`（同文件 L_0AD6）也有一句同样的调用。
+        if (where == CardLocation.BoardFrontline)
+        {
+            _engine.RefreshFrontlineOwner(card);
+        }
+
         if (newGiveBlitz)
         {
             card.Keywords.Add(Keyword.Blitz);
@@ -1606,12 +1799,48 @@ public sealed partial class CardApi
             return;
         }
 
+        // ★ 钉住被摘掉时把剩余回合数清零 —— 蓝图 `RemovePin` i=1273
+        //   （`BP_CardFunctions.g.cs:31799`）就是 `card.pinnedTurns = 0`。
+        //   不清的话，下一次再被钉住时 `Max(旧值, 3或2)` 会把时长算长。
+        if (keyword == Keyword.Pinned)
+        {
+            target.PinnedTurns = 0;
+        }
+
         _engine.FireSubAction($"ZActionRemove{keyword}", new[]
         {
             ActionValue2.Int("giverID", target.CardId),
         });
 
         FireAbilitiesChanged(target);
+    }
+
+    /// <summary>
+    /// 钉住一个单位（对应 `BP_CardFunctions::PinUnit`，`BP_CardFunctions.g.cs:27852`）。
+    ///
+    /// 与 <see cref="SuppressUnit"/> 同构：加关键字 + **记下时长**。
+    /// 时长照 `PinUnit` i=955（`BP_CardFunctions.g.cs:27957-27964`）：
+    /// <code>
+    ///   IsSideActive(_card, _card.side) -> active
+    ///   SelectInt(3, 2, active)          ; 真取 3、假取 2
+    ///   pinnedTurns = Max(pinnedTurns, 那个值)
+    /// </code>
+    /// 即"被钉住的那张卡**自己那一方**是否正在行动"。配上
+    /// `DecrementPinnedTurnsEndTurn`（每个回合结束减 1）正好等于权威规则表的
+    /// 「于单位所有者**下个回合结束时**移除」：
+    /// · 我回合钉**敌方** → 2 次回合结束（我的、他的）⇒ 他的回合结束解除；
+    /// · 我回合钉**自己** → 3 次回合结束（我的、他的、我的）⇒ 我的下回合结束解除。
+    ///
+    /// ⚠️ 蓝图在这之后还有三条守卫（`i=99` `cantBePinned` / `i=215` `IsLocatedOnBoard`
+    ///    / `i=266` `IsUnit`），命中就**只写 `pinnedTurns`、不加关键字**。内核这里
+    ///    **没有**实现那三条守卫（是另一个独立的缺口，不在本次改动范围内，如实记录）。
+    /// </summary>
+    public void PinUnit(CardInstance target)
+    {
+        GiveKeyword(target, Keyword.Pinned);
+
+        int turns = IsSideActive(target.Owner) ? 3 : 2;
+        target.PinnedTurns = Math.Max(target.PinnedTurns, turns);
     }
 
     /// <summary>
@@ -1631,48 +1860,280 @@ public sealed partial class CardApi
             });
 
     /// <summary>
-    /// 压制一张单位（对应 `BP_CardFunctions::SuppressUnit` → `SuppressMultipleUnits`）。
-    ///
-    /// 出处：`out/bp-cardfn.json` 函数 `SuppressMultipleUnits`（`SuppressUnit` i=20 转发过来）：
+    /// 「抑制」摘除的关键词集 —— 出处 `BP_CardFunctions::SuppressMultipleUnits`
+    /// 的 Remove* 链（`ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs`）：
     /// <code>
-    /// i=548  _card.IsLocatedOnBoard()
-    /// i=589  Not_PreBool(_card.isSuppressed)
-    /// i=618  BooleanAND(i=548, i=589)              ; 守卫：在场 && 尚未被压制
-    /// i=656  PopExecutionFlowIfNot                 ; 不满足就整段跳过
-    /// i=681  _wasAlreadySuppressed = _card.isSuppressed
-    /// i=722  _card.isSuppressed = true
-    /// i=788  JumpIfNot 6194 (_wasAlreadySuppressed) ; 为假 ⇒ 跳去 6194
-    /// i=6194 _card.OnSuppressed()                   ; ★ 自己（此前从未派发）
-    /// i=6230 Jump 802                               ; 回来跑广播循环
-    /// i=802  FetchAllCardsWithEventTrigger(58)      ; 58 = OnOtherCardSuppressed
-    /// i=1071 item.OnOtherCardSuppressed(_card)
+    /// L_054E i=1358  RemoveGuard
+    /// L_0582         RemoveFury
+    /// L_05B5         RemoveBlitz
+    /// L_05F1         RemoveImmune
+    /// L_062D         RemoveAlpine
+    /// L_0669         RemoveAmbush
+    /// L_069D         RemoveMobilize
+    /// L_06DA         RemoveSmokescreen
+    /// L_070E         ChangeHeavyArmor(卡, 0, 0, changeType=3, skipAction=true) ; 重甲清零
+    /// L_073F         RemoveSalvage                                          ; ★
+    /// L_077B         RemoveShock
+    /// L_07B8         card.hasDestruction = False
     /// </code>
-    /// 触发号 58 的依据：`ERegisteredCardFunction.h` 逐项数下来第 59 项 = `OnOtherCardSuppressed`。
+    ///
+    /// ⚠️⚠️ **`Salvage`（收缴）在表里 —— 2026-10-02 第二轮改**。上一轮把它排除在外，
+    /// 引的是权威规则表 `KARDS基础规则参考.md:125`「抑制**不能**使单位失去
+    /// 『压制』『被收缴』『被抑制』『被控制』」。**那条被读错了**：
+    /// · `:109-110` 说「**收缴/被收缴**：收缴卡牌消灭敌方单位时，将其 1/1 复制加入手牌
+    ///   …… **被收缴单位**与收缴它的卡牌属于同一个国家，属性 1/1，保留原始单位的所有效果」
+    ///   ⇒ 「被收缴」指的是**那个 1/1 复制品的状态**（蓝图字段 `isSalvaged`），
+    ///   不是"有收缴能力"（蓝图字段 `hasSalvage` = 内核 `Keyword.Salvage`，
+    ///   映射见 `KismetVm.cs:1013`）。
+    /// · 蓝图确实**没有**碰 `isSalvaged`（它只拿它决定 `_staticAttack/_staticDefense = 1`，
+    ///   `:36108-36112`）—— 规则表那句在这个读法下**成立**；
+    ///   而它**明确调了** `RemoveSalvage`（`L_073F` → `:35922`），
+    ///   `RemoveSalvage` 的实现体第一条就是 `card.hasSalvage = False`（`:32127`）。
+    /// ⇒ 「抑制不摘『被收缴』」与「抑制摘掉收缴**能力**」两件事不矛盾，按蓝图实现。
+    ///
+    /// `Pinned`（压制）**不入表** —— 蓝图整段没有任何 `RemovePin`，
+    /// 且玩家（雪雾）明确说过「**压制不会受到抑制的影响**」（`Pin` 与 `Suppress`
+    /// 在中文客户端分别译作「压制」与「抑制」，是两个关键字）。
+    /// `Suppressed` 自己同理（由本函数自管）。
+    /// </summary>
+    private static readonly string[] SuppressStrips =
+    {
+        Keyword.Guard,
+        Keyword.Fury,
+        Keyword.Blitz,
+        Keyword.Immune,
+        Keyword.Alpine,
+        Keyword.Ambush,
+        Keyword.Mobilize,
+        Keyword.Smokescreen,
+        Keyword.HeavyArmor,
+        Keyword.Shock,
+        Keyword.Destruction,
+        Keyword.Salvage,
+    };
+
+    /// <summary>
+    /// 抑制一张单位（对应 `BP_CardFunctions::SuppressUnit` → `SuppressMultipleUnits`，
+    /// 完整函数体 `BP_CardFunctions.g.cs:35659-36468`）。
+    ///
+    /// ## 函数体在做什么（逐段，`L_xxxx` = 字节偏移）
+    ///
+    /// <code>
+    /// L_0061 i=97   IsActionProcess → 不是动作流程就整段跳过
+    /// L_00BE        for each cardID in cardsToSuppress：
+    /// L_01B6          GetCardFromID
+    /// L_01E9          HasCustomAbility(card, "cantBeSuppressed")   ; ★ 守卫之一
+    /// L_0224          IsLocatedOnBoard(card)                       ; ★ 守卫之二
+    /// L_026A          BooleanAND(isOnBoard, Not(cantBeSuppressed))
+    /// L_02A9          _wasAlreadySuppressed = card.isSuppressed
+    /// L_02D2          card.isSuppressed = True                     ; ★ 先置位，再摘东西
+    /// L_0314          if (!_wasAlreadySuppressed) → 广播 OnOtherCardSuppressed(触发号 58)
+    /// L_047E          IsUnrevealedCovertCard → RevealCard
+    /// L_054E/1358     ① 摘关键词（见 SuppressStrips）+ 清 customJson + 摘卡牌给的能力
+    /// L_119E/4510     ② 数值回落（GetStaticCard → 攻/防/行动费）+ JSON_Clear("veteran")
+    /// L_136A/4970     ③ 攻防差额分流（只在"当前值 ≠ 卡面值"时改写；防御只在更高时压下来）
+    /// L_15A5/5541     ④ 广播 OnAfterOtherCardSuppressed(触发号 11)
+    /// L_174B          ⑤ card.OnSuppressed()（在 ④ 之后、OnOtherCardSuppressed 之前）
+    /// </code>
+    ///
+    /// ⚠️ ①②③ 各自还带 `IsActionProcess()` 分流（`PushExecutionFlow`/`PopExecutionFlow`
+    /// 那套），内核不建模"动作流程/回放流程"这一层，一律按主流程实现
+    /// —— 如实记录这个简化。
+    ///
+    /// ## ① 摘关键词 + 清 customJson + 卡牌给的能力
+    /// <code>
+    /// L_054E..L_073F  RemoveGuard/Fury/Blitz/Immune/Alpine/Ambush/Mobilize/Smokescreen
+    ///                 /ChangeHeavyArmor(0)/RemoveSalvage/RemoveShock
+    /// L_07B8/L_07D9   hasDestruction = False ; exileNation = 0
+    /// L_0803/L_083A   hasActivePincerEffect → RemovePincerEffects(card)
+    /// L_0851/L_0886   customName1 = None ; customName2 = None
+    /// L_08BB          KreditsTax_AsEnemyTarget = 0
+    /// L_0925          JsonHasField(customJson,"suppressionException") → **只保留这个字段**
+    ///                 （`customJson = JsonMake()` + 把它原样写回；同时若 `IsVeteran(card,true)`
+    ///                  会写一个 veteran=true 进去 —— 但紧接着 ② 的 `JSON_Clear("veteran")`
+    ///                  又把它删掉，净效果 = veteran 字段不保留）
+    /// L_0B69          effectType = 0
+    /// L_0B93..L_1DE3  遍历 receivedAbilitiesFromCards：对 **trigger/destruction/passive/
+    ///                 lethal/custom** 五类里的每个 giver →
+    ///                 ChangeBuffsFromCards(卡, 0, giverID, buffType=5, changeType=7 /*customRemove*/,
+    ///                                     给卡的名字)  ; 摘掉"卡牌给它的额外特效"
+    ///                 其余类别（guard/fury/… 那些关键字）→ 把"自己给自己的那条"从 giver 表里剔掉
+    /// </code>
+    ///
+    /// ## ②③ 数值回落 —— **"所有增益失效"的真正落点**
+    /// <code>
+    /// L_11A3  StaticCardRef = GetStaticCard(card, card.name)      ; 卡面静态卡
+    /// L_11E9  if (card.isSalvaged) { _staticAttack = 1; _staticDefense = 1 }
+    ///         else { _staticAttack  = getAndDecryptAttack(StaticCardRef)
+    ///                _staticDefense = getAndDecryptDefense(StaticCardRef) }
+    /// L_123B  _staticOperationCost = StaticCardRef.operationCost
+    ///         card.range = StaticCardRef.range
+    /// L_12B3  JSON_Clear(card, "veteran")                       ; ★★ 老兵变回原形
+    /// L_136A  attackDifference = card.attack - _staticAttack
+    ///         if (≠0) ChangeAttack(card, instigatorID, _staticAttack, changeType=3 /*Suppress*/)
+    ///         else    ChangeBuffsFromCards(card, 0, instigatorID, 0 /*Attack*/, 3, "")  ; 清攻击 buff
+    /// L_1441  card.maxDefense = _staticDefense
+    ///         if (getTotalDefense(card) > _staticDefense)
+    ///             ChangeDefense(card, instigatorID, _staticDefense, 3)  ; **只在更高时压下来**
+    ///         else ChangeBuffsFromCards(card, 0, instigatorID, 1 /*Defense*/, 3, "")
+    /// L_1504  ChangeOperationCost(card, instigatorID, _staticOperationCost, 3, false,false,false)
+    /// </code>
+    /// `changeType=3` 就是 `EChangeType::Suppress`（`EChangeType.h`：0 tempBuffGive /
+    /// 1 permBuff / 2 SetValue / **3 Suppress** / 4 tempBuffRemove / 5 veteranSet / …），
+    /// 而 `ChangeAttack` 的 `2/3/5` 走**同一个** `setAndEncryptAttack` 分支
+    /// （见 `CardApiDispatch.DoChangeAttack` 那段注释）⇒ **3 = 把攻/防/行动费设成卡面值**。
+    /// 注意"**防御只在更高时压下来**"这一条：低了**不补**（否则抑制会变成治疗）。
+    ///
+    /// ## 内核的取舍（如实记录）
+    /// <list type="bullet">
+    /// <item>`exileNation` / `effectType` / `range` 三个字段内核**没有建模** ⇒ 无法清零，
+    ///   它们参与的判定本来也不在（记为已知缺口）。</item>
+    /// <item>`isSalvaged`（1/1 收缴复制品）内核没建模 ⇒ 静态值一律取 `Definition` 卡面值。</item>
+    /// <item>关于 `cantBeSuppressed` 守卫：蓝图**两条**都查（`IsLocatedOnBoard` +
+    ///   `!HasCustomAbility(card,"cantBeSuppressed")`，IR 里 `cantBeSuppressed` 出现 9 次），
+    ///   本轮补上（原先只查"在场 + 未被抑制"）⇒ `card_event_maginot_line` /
+    ///   `card_event_no_retreat` / `card_unit_10th_guards_regiment` 这类
+    ///   「Cannot Retreat or be Suppressed.」的卡不会再被误抑制。</item>
+    /// <item>`RemovePincerEffects`（`L_083A`）内核没有实现（IR 里 0 个调用点，
+    ///   `pincer_receiver`/`pincer_givers` 那套 JSON 也完全没建模）——
+    ///   但**钳击给的加成本身在 `BuffsBySource` 里**，会被本函数的增益清洗一并摘掉，
+    ///   所以可观测效果一致；`Pincer` 关键字按蓝图**不摘**。</item>
+    /// </list>
     /// </summary>
     public void SuppressUnit(CardInstance target)
     {
-        if (!IsLocatedOnBoard(target) || target.Keywords.Contains(Keyword.Suppressed))
+        // 守卫：在场 && 尚未被抑制 && 没有 `cantBeSuppressed` 自定义能力
+        // （蓝图 L_01E9/L_0224/L_026A；后一条是本轮补的）。
+        if (!IsLocatedOnBoard(target)
+            || target.Keywords.Contains(Keyword.Suppressed)
+            || HasCustomAbility(target, "cantBeSuppressed"))
         {
             return;
         }
 
+        // ★ 先置位再摘东西 —— 与蓝图同序（L_02D2 在 L_054E 之前）。
+        //   顺序有观测意义：摘关键字会走 `RemoveKeyword` → `ZActionRemove*` +
+        //   `FireAbilitiesChanged`，而被抑制的卡在这些派发里应当**已经被抑制**
+        //   （`CardApi.FireTrigger` si=325/710：`cardTriggered.isSuppressed` ⇒ 整轮不派发）。
         target.Keywords.Add(Keyword.Suppressed);
+
+        // 记下被抑制的回合号 —— 仅作诊断留痕，见 `CardInstance.SuppressedOnTurn`。
+        // ⚠️ 2026-10-02（第三轮）：它原先驱动一条"到期解除"（`ClearExpiredSuppression`），
+        //    那条已删 —— 抑制按玩家确认/蓝图是**永久**的，所以这个值不会再被复位。
+        target.SuppressedOnTurn = _engine.State.Turn;
+
+        // ---- ①a 摘关键词（可逆）----
+        // 蓝图用 `_wasAlreadySuppressed`（`:35779-35806`）把这一整段放在"首次"分支里；
+        // 上面那道 `Contains(Suppressed)` 门已经保证了这里就是首次。
+        target.SuppressStrippedKeywords ??= new List<string>();
+        foreach (string keyword in SuppressStrips)
+        {
+            if (target.Keywords.Contains(keyword))
+            {
+                RemoveKeyword(target, keyword);
+                target.SuppressStrippedKeywords.Add(keyword);
+            }
+        }
+
+        // 重甲清零：`Keyword.HeavyArmor` 是派生关键字（RecalculateStats 会按点数重挂），
+        // 所以必须同时把**卡面重甲**遮住（L_070E 的 ChangeHeavyArmor(0)）。
+        // ⚠️ 这里**不**立刻重算：此刻重甲的 buff 还在（要到 ③ 才摘），
+        //    现在算会把 `Keyword.HeavyArmor` 又挂回去。真正的重算在 ③ 之后统一做一次。
+        target.HeavyArmorZeroedBySuppress = true;
+
+        // `TARGET` 的自定义能力（= 卡牌给单位添加的额外特效）也要失效。
+        // 蓝图走的是 L_0B93 那一遍 `receivedAbilitiesFromCards` 清洗
+        // （buffType=5 / changeType=7 customRemove），内核没有那张 giver 表，
+        // 只有 `CustomAbility` 这一个槽位 —— 摘掉并记下（解除时装回）。
+        if (target.CustomAbility is { Length: > 0 } ability)
+        {
+            target.SuppressStrippedCustomAbility = ability;
+            target.CustomAbility = null;
+        }
+
+        // ---- ①b 清 customJson：只保留 `suppressionException`（L_0925-0B38）----
+        // `suppressionException` 是**卡自己的**恢复机制：抑制会洗掉整个 customJson，
+        // 唯独把它原样写回，卡（如 `card_unit_gordon_highlanders`）才能在抑制后
+        // 把自己保存的状态读回来。IR 里这个键出现 26 次。
+        // `customName1/2` 也存在 customJson 里（见 `CardApiDispatch.SuffixAdd`），
+        // 所以这一句同时完成了蓝图 L_0851/L_0886 的 `customName1/2 = None`。
+        target.CustomJson.TryGetValue("suppressionException", out string? exception);
+        target.CustomJson.Clear();
+        if (!string.IsNullOrEmpty(exception))
+        {
+            target.CustomJson["suppressionException"] = exception;
+        }
+
+        // ---- ①c KreditsTax_AsEnemyTarget = 0（L_08BB）----
+        target.KreditsTaxAsEnemyTarget = 0;
+
+        // ---- ② 老兵变回普通形态（L_12B3 `JSON_Clear(card,"veteran")`）----
+        // 内核的老兵是 `Keyword.Veteran`（`MakeVeteran` 只加这一个关键字，
+        // 见那边的注释：蓝图还会把 vet_card 的攻/防/行动费/关键字整套搬过来，
+        // 内核**没有** veteran 卡数据 ⇒ 那一半是既有缺口）。
+        // 直接删关键字 + 删 customJson 的 `veteran` 键（`Clear()` 已经把它清掉了），
+        // 与 `JSON_Clear` 一样**不发**任何子动作。
+        target.Keywords.Remove(Keyword.Veteran);
+
+        // ---- ③ 所有增益失效：攻/防/重甲/行动费 buff 逐条摘走（记原文，供解除时装回）----
+        // 玩家原话：「所有的增益效果也全部失效 —— 包括友方贴膜、敌方贴膜、
+        // 友方卡牌给单位添加的额外特效」。
+        // ⚠️ 只摘 **攻/防/重甲/行动费** 四项：蓝图的回落段只处理这四项，
+        //    **碰都没碰改费**（整段没有 ChangeKreditCost）——
+        //    纯改费条目（KreditCost ≠ 0 而其余为 0）保持原样。
+        target.SuppressStrippedBuffs ??= new List<KeyValuePair<(int, bool), CardBuff>>();
+        foreach (var key in target.BuffsBySource.Keys.ToList())
+        {
+            CardBuff buff = target.BuffsBySource[key];
+            if (buff.Attack == 0 && buff.Defense == 0 && buff.HeavyArmor == 0 && buff.OperationCost == 0)
+            {
+                continue;
+            }
+
+            target.SuppressStrippedBuffs.Add(new KeyValuePair<(int, bool), CardBuff>(key, buff.Clone()));
+
+            buff.Attack = 0;
+            buff.Defense = 0;
+            buff.HeavyArmor = 0;
+            buff.OperationCost = 0;
+            if (buff.IsEmpty)
+            {
+                target.BuffsBySource.Remove(key);
+            }
+        }
+
+        // ---- ④ 数值回落到卡面静态值（L_136A / L_1441 / L_1504）----
+        target.Attack = target.Definition.Attack;        // ChangeAttack(…, _staticAttack, Suppress)
+
+        // 防御：**只在当前更高时压下来**（蓝图 `getTotalDefense > _staticDefense` 才改写）
+        // ⇒ 抑制**不会治疗**一个已经被打残的单位。MaxDefense 按蓝图直接取静态值。
+        if (target.Defense > target.Definition.Defense)
+        {
+            target.Defense = target.Definition.Defense;
+        }
+
+        target.MaxDefense = target.Definition.Defense;
+
+        // 行动费/重甲/关键字由 `RecalculateStats()` 按"卡面 + 剩余 buff"绝对值重算 ——
+        // 上一步已经把攻/防/重甲/行动费的 buff 清干净，所以这里算出来就是卡面值
+        // （即 `_staticOperationCost`），且不会破坏纯改费 buff。
+        target.RecalculateStats();
+
         _engine.FireSubAction("ZActionSuppressUnit", new[]
         {
             ActionValue2.Int("cardID", target.CardId),
         });
 
-        // ⚠️ **顺序照抄蓝图**：`SuppressMultipleUnits` 里"别人"那一遍在**前**、
-        //    被压制的卡自己的 `OnSuppressed()` 在**后**：
-        //      si=6074  item.OnAfterOtherCardSuppressed(_card)   ← 广播（触发号 11）
-        //      si=6194  _card.OnSuppressed()                      ← 自己
-        //      si=802   FetchAllCardsWithEventTrigger(58) → item.OnOtherCardSuppressed(_card)
+        // ---- ⑤ 广播（顺序照抄蓝图）----
+        //    si=6074  item.OnAfterOtherCardSuppressed(_card)   ← 广播（触发号 11）
+        //    si=6194  _card.OnSuppressed()                      ← 自己
+        //    si=802   FetchAllCardsWithEventTrigger(58) → item.OnOtherCardSuppressed(_card)
         //    （触发号 58 那一遍在 si=6230 `Jump 802` 之后，所以排在最后。）
         // ⚠️ 名字以 `OnAfter` 开头、但语义是**广播**（蓝图 si=6074 那一遍遍历的是
         //    `FetchAllCardsWithEventTrigger(11)` 的**全部订阅者**，没有排除自己）。
         //    `FireTrigger` 的广播判据是「程序名以 `OnOther` 开头」，这个名字不满足，
         //    所以必须**同时**用 `otherProgramName` 再发一遍 —— 只传 programName 的话
-        //    它只会发给主体，4 张订阅者里除主体外全部收不到。
+        //    它只会发给主体，订阅者里除主体外全部收不到。
         FireTrigger("OnAfterOtherCardSuppressed", target, target.Owner,
             otherProgramName: "OnAfterOtherCardSuppressed",
             eventArgs: new object?[] { target },
@@ -1690,6 +2151,86 @@ public sealed partial class CardApi
             {
                 ["card"] = target,
             });
+    }
+
+    /// <summary>
+    /// 抑制还原 —— 把 <see cref="SuppressUnit"/> 摘掉的东西**原样装回去**。
+    ///
+    /// ⚠️⚠️ 2026-10-02（第三轮）：**本方法当前没有任何产品调用方（不可达）**。
+    /// 它原先唯一的调用方 `MatchEngine.ClearExpiredSuppression` 已**整条删除** ——
+    /// 那条「抑制到期解除」是内核自己发明的：玩家（雪雾）确认抑制**【永不解除】**
+    /// （「一直白板到游戏结束」），蓝图 `isSuppressed` 全库**只有一处写点且写的是 `True`**
+    /// （`BP_CardFunctions.g.cs:35781`），**没有任何一处写 `False`**。
+    /// ⇒ 抑制按蓝图/玩家确认是**永久的**，所以这条还原路径**不会被触发**。
+    ///
+    /// **但它不删**：摘除（<see cref="SuppressUnit"/>）与还原是**成对**的能力，删掉还原
+    /// 就等于把"抑制到底摘了什么"的对照面也一起删了；将来若真出现需要还原的机制
+    /// （例如某张卡的 `suppressionException` 语义被证实包含"取消抑制"），这里是唯一入口。
+    /// 保留的代价是零（无人调用 = 无行为），收益是可读性与可复用性。
+    ///
+    /// 自测：`SuppressStripsEverythingAndRestores` 段⑥ **手工直调**本方法，
+    /// 验证它仍能完整还原（对称性有守卫，不会被"顺手改坏"）。
+    ///
+    /// 各段与 <see cref="SuppressUnit"/> 的摘除一一对应：
+    /// <list type="bullet">
+    /// <item>关键词：逐条 `GiveKeyword`（发 `ZActionGive*` + `FireAbilitiesChanged`，
+    ///   与蓝图"能力集变了"那条广播同序）。</item>
+    /// <item>攻/防/重甲/行动费 buff：装回条目，并做**对称逆运算**把数值加回
+    ///   （`Attack += saved.Attack` / `Defense += saved.Defense`）——
+    ///   与 `RemoveTemporaryBuffs` 同一套写法。抑制期间挨的伤害因此**不会**被抹掉：
+    ///   摘除时防御是"压到卡面值"，装回时只是把当初减掉的那一份加回去。</item>
+    /// <item>卡面重甲遮蔽位复位。</item>
+    /// <item>`CustomAbility` 装回。</item>
+    /// <item>`suppressionException` / 被洗掉的其它 `customJson` 键**不还原** ——
+    ///   蓝图那边也是单向洗掉（抑制本身就要求"失去所有特效"），
+    ///   卡要靠 `OnSuppressed` 钩子自己重建状态。</item>
+    /// </list>
+    /// </summary>
+    public void RestoreAfterSuppression(CardInstance card)
+    {
+        card.Keywords.Remove(Keyword.Suppressed);
+        card.SuppressedOnTurn = -1;
+
+        if (card.SuppressStrippedKeywords is { Count: > 0 } keywords)
+        {
+            foreach (string keyword in keywords)
+            {
+                GiveKeyword(card, keyword);
+            }
+
+            keywords.Clear();
+        }
+
+        if (card.SuppressStrippedBuffs is { Count: > 0 } buffs)
+        {
+            foreach (var (key, saved) in buffs)
+            {
+                CardBuff live = GetOrCreateBuff(card, key.SourceCardId, key.Temporary);
+                live.Attack += saved.Attack;
+                live.Defense += saved.Defense;
+                live.HeavyArmor += saved.HeavyArmor;
+                live.OperationCost += saved.OperationCost;
+                if (saved.Duration > 0)
+                {
+                    live.Duration = saved.Duration;
+                }
+
+                card.Attack = Math.Max(0, card.Attack + saved.Attack);
+                card.Defense += saved.Defense;
+            }
+
+            card.MaxDefense = Math.Max(card.Defense, card.Definition.Defense);
+            buffs.Clear();
+        }
+
+        card.HeavyArmorZeroedBySuppress = false;
+        card.RecalculateStats();
+
+        if (card.SuppressStrippedCustomAbility is { Length: > 0 } ability)
+        {
+            card.CustomAbility = ability;
+            card.SuppressStrippedCustomAbility = null;
+        }
     }
 
     /// <summary>
@@ -1876,6 +2417,43 @@ public sealed partial class CardApi
         return new List<CardInstance>();
     }
 
+    /// <summary>
+    /// 把 VM 传来的值当作**元素类型无关**的蓝图数组。
+    ///
+    /// 为什么需要它：UE 里 <c>TArray&lt;int&gt;</c> 与 <c>TArray&lt;UObject*&gt;</c> 是两种
+    /// 不同的容器，而本内核的 VM 是**无类型**的 —— 数组原语必须两种都认。
+    /// <see cref="EvalArray"/> 只认 <c>List&lt;CardInstance&gt;</c>，
+    /// 于是拿一个 ID 数组（例：<c>GetDeckByside</c> 的 <c>deckCardIDs</c>，
+    /// 出参是 <c>TArray&lt;int&gt;</c>，见 <see cref="GetDeckBySide"/> 的注释）
+    /// 去问 <c>Array_Length</c> 会得到 0、问 <c>Array_Get</c> 会得到 null ——
+    /// 那比"元素类型不对"更糟：整段循环直接被跳过。
+    ///
+    /// 元素类型在这里**故意不判**：`Array_Contains` / `Array_Remove*` 的值比较
+    /// 由 <c>CardApiDispatch.SameArrayValue</c> 统一处理（卡实例 ↔ 整数 ID 互通）。
+    /// </summary>
+    internal static System.Collections.IList EvalList(object? receiver, object?[] args)
+    {
+        if (receiver is System.Collections.IList rl && receiver is not string)
+        {
+            return rl;
+        }
+
+        foreach (object? v in args)
+        {
+            if (v is System.Collections.IList list && v is not string)
+            {
+                return list;
+            }
+        }
+
+        if (receiver is CardInstance single)
+        {
+            return new List<CardInstance> { single };
+        }
+
+        return new List<CardInstance>();
+    }
+
     internal static List<int> AsIntList(object? v) => v switch
     {
         List<int> list => list,
@@ -1897,7 +2475,25 @@ public sealed partial class CardApi
     public bool IsAirUnit(CardInstance c) => c.Definition.Type is "fighter" or "bomber";
     public bool IsOrder(CardInstance c) => c.Definition.IsOrder;
     public bool IsLocationCard(CardInstance c) => c.Definition.IsLocationCard;
-    public bool IsSameSideUnit(CardInstance a, CardInstance b) => a.Owner == b.Owner && IsUnit(a) && IsUnit(b);
+    /// <summary>
+    /// 「**这张卡**是不是 <paramref name="side"/> 那一方的**单位**」——
+    /// `UBaseCardObject::IsSameSideUnit(ESideEnum side)` 的**真实形状**（成员函数，接收者才是被查的卡）。
+    ///
+    /// ⚠️ 旧实现写成 `IsSameSideUnit(CardInstance a, CardInstance b)`（两张卡），
+    /// 而全卡池**不存在** `(卡, 卡)` 形状的调用点 —— 直译产物
+    /// `out/Generated-gap/_deps/*.g.cs` 里 17 种调用形状无一例外是
+    /// `H.Call("IsSameSideUnit", [卡, side, out])`；IR 侧同样
+    /// （`card_location_british_scen4` i=4008/4027/4152：`a[0]` = `{"var":"side"}` 或
+    /// `GetOppositeSide(...)`，`a[1]` = out 槽，`recv` = `K2Node_Event_cardPlayed`）。
+    /// 旧形状把 `a[0]`（int 阵营）当卡读 ⇒ **19/19 个调用点恒 false**。
+    ///
+    /// 「同阵营」和「是单位」两件事**都要判**：证据是
+    /// `card_event_air_corps_ferrying.CanPlayFromHand` 的全部判据只有
+    /// `GetTargetedCard` + `IsSameSideUnit(target, side)`，失败时 reason 是
+    /// `"friendly_unit"`（卡面「Give a friendly unit +1+1」）——
+    /// 只判阵营的话，把这张牌指向一个非单位目标也会放行。
+    /// </summary>
+    public bool IsSameSideUnit(CardInstance card, Side side) => IsUnit(card) && card.Owner == side;
 
     public bool IsSideActive(Side s) => State.ActiveSide == s;
     public Side GetOppositeSide(Side s) => s.Opposite();
@@ -1912,13 +2508,70 @@ public sealed partial class CardApi
     public IEnumerable<CardInstance> GetAllCardsOnBoard() => GetAllUnitsOnBoard().Concat(new[] { State.Hq(Side.Left), State.Hq(Side.Right) });
     public IEnumerable<CardInstance> GetAllCards() => State.AllCards;
     public IEnumerable<CardInstance> GetCardsInHandBySide(Side s) => State.Hand(s);
-    public IEnumerable<CardInstance> GetDeckBySide(Side s) => State.Deck(s);
+    /// <summary>
+    /// 「某一方牌库里的**卡 ID**」。蓝图链条：
+    /// `BP_CardFunctions.GetDeckByside`（薄包装，反编译原文
+    /// `out/Generated-gap/_deps/BP_CardFunctions.g.cs:20913-20931`）
+    /// → `BP_GameState_Battle.GetDeckBySide`
+    /// → `GameState.DeckCardIDs_Left` / `DeckCardIDs_Right`
+    /// （`ref/kards-sim/KardsSim/Generated/_deps/BP_GameState_Battle.g.cs:1837/1841`，
+    /// 成员名就写着 **IDs**）。
+    ///
+    /// ⚠️ 出参是 <c>TArray&lt;int&gt;</c>（卡 **ID**），**不是**卡实例。
+    /// 全卡池 46 张调用它的卡里，`Array_Get` 出来的元素只有三种用法，**全部是整数语义**：
+    /// <list type="bullet">
+    /// <item><c>GetCardFromID(deck[i])</c>（29 张，例 <c>card_event_blockade</c>、
+    ///       <c>card_event_colossus</c>、<c>card_event_flight_to_oblivion</c>）</item>
+    /// <item><c>Greater_IntInt(deck[i], 0)</c> / <c>JSON_SetInt(…, deck[i])</c> /
+    ///       <c>DiscardCardFromDeck(deck[i], …)</c>（例 <c>card_unit_lovat_scouts</c> i=180、
+    ///       <c>card_event_alpenfestung</c> 的成员 <c>topID</c>）</item>
+    /// <item><c>DrawSpecificCardFromDeckBySide(cardID, deck[i], side, false)</c>
+    ///       （例 <c>card_event_defend_the_empire</c> i=869）</item>
+    /// </list>
+    /// 另外 <c>DrawSpecificCardFromDeckBySide</c> 的内联体第一步就是
+    /// <c>Array_Contains(deckCardIDs, cardID)</c>（同文件 <c>:12460</c>）——
+    /// 拿牌库数组和一个**整数** cardID 比。
+    /// **没有一个调用点把元素当卡实例用。**
+    ///
+    /// 旧实现返回 <c>IEnumerable&lt;CardInstance&gt;</c> ⇒
+    /// <c>AsInt(卡实例) = 0</c>（`CardApiDispatch.cs:2976` 的 <c>_ =&gt; 0</c>）⇒
+    /// 上面三种判据**全部恒假**。实测症状（对局 542091 t7）：
+    /// pams 开发出的 <c>card_event_convoy_175</c>（卡 id 5002）费用没被设成 0，
+    /// 内核对它收 3 费（探针 <c>[CANPLAY] left card_event_convoy_175 cost=3</c>）。
+    /// 回归用例：`tools/BotSim/SelfTest.cs` 的 <c>GetDeckBySideReturnsCardIds</c> /
+    /// <c>PamsDevelopedCardCostZero</c>。
+    /// </summary>
+    public List<int> GetDeckBySide(Side s) => State.Deck(s).Select(c => c.CardId).ToList();
 
     public int GetTotalAttack(Side s) => State.Board(s).Sum(u => u.Attack);
     public int GetTotalDefense(Side s) => State.Board(s).Sum(u => u.Defense);
 
     public CardInstance? GetRandomCard(IReadOnlyList<CardInstance> pool)
-        => pool.Count == 0 ? null : pool[State.Random.Next(pool.Count)];
+    {
+        if (pool.Count == 0)
+        {
+            return null;
+        }
+
+        // `GetRandomCard(cards, skipCustomAlways, out randomCard)` 在蓝图里是
+        // `RandomIntegerInRangeFromStream(cardsRandomStream, 0, Length-1)`
+        // （`ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:21682-21698`）——
+        // 一次消费、闭区间。游标探针记下候选集大小与选中下标，用来和客户端对账。
+        int index = State.Random.Next(pool.Count);
+        CardInstance picked = pool[index];
+        // 候选集的**内容与顺序**也要记 —— 同一次消费、同一个下标，
+        // 候选集排列不同就会取到不同的卡（这是"随机效果与客户端不一致"的第三个成因）。
+        //
+        // ⚠️ 截断上限从 24 提到 **64**：854099/508065 那两类元的候选池正好是 **53** 张
+        //    （美国单位全表，按名字序），截在 24 就**看不到客户端那张卡的下标**，
+        //    也就分不清"池子排列不同"和"随机下标不同"——而这正是要判的那件事。
+        const int poolDumpLimit = 64;
+        string poolDump = pool.Count <= poolDumpLimit
+            ? string.Join(",", pool.Select(x => x.Name))
+            : string.Join(",", pool.Take(poolDumpLimit).Select(x => x.Name)) + ",…";
+        State.TraceRandom($"GetRandomCard n={pool.Count} idx={index} -> {picked.Name} 池=[{poolDump}]");
+        return picked;
+    }
 
     // ==================================================================
     //  未实现统计
@@ -1930,12 +2583,19 @@ public sealed partial class CardApi
         State.UnimplementedCalls[name] = State.UnimplementedCalls.GetValueOrDefault(name) + 1;
     }
 
-    private static CardBuff GetOrCreateBuff(CardInstance card, int sourceCardId)
+    /// <summary>
+    /// 取（或建）某个来源在卡上的 buff 槽。
+    /// <paramref name="temporary"/> 是键的一部分 —— 见
+    /// <see cref="CardInstance.BuffsBySource"/> 上那段说明：临时的和永久的两笔
+    /// 必须分开存，否则回合结束清理会把永久那笔一起删掉。
+    /// </summary>
+    private static CardBuff GetOrCreateBuff(CardInstance card, int sourceCardId, bool temporary = false)
     {
-        if (!card.BuffsBySource.TryGetValue(sourceCardId, out var buff))
+        var key = (sourceCardId, temporary);
+        if (!card.BuffsBySource.TryGetValue(key, out var buff))
         {
-            buff = new CardBuff { SourceCardId = sourceCardId };
-            card.BuffsBySource[sourceCardId] = buff;
+            buff = new CardBuff { SourceCardId = sourceCardId, Temporary = temporary };
+            card.BuffsBySource[key] = buff;
         }
 
         return buff;

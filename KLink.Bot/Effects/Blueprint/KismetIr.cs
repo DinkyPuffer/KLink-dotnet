@@ -87,6 +87,19 @@ public sealed class KismetLibrary
     public KismetCard? Find(string cardName) => _cards.GetValueOrDefault(cardName);
 
     /// <summary>
+    /// 全部卡（卡名 → 卡）。
+    ///
+    /// 加它是为了「派发表静态缺口守卫」（`tools/BotSim/DispatchGap.cs`）：
+    /// 那个守卫必须遍历**全部**卡的 `Steps` 才能算出「IR 会调用、派发表里没有、
+    /// 而且 locals 也兜不住」的完整集合。除此之外没有别的用途，
+    /// 所以返回的是只读视图（`_cards` 本身不暴露）。
+    ///
+    /// ⚠️ 名字**不能**叫 `Cards`：本文件里已有 `Cards.CardDatabase.ResolveBaseName(...)`
+    /// 这种限定写法，同名属性会把它遮蔽掉（编译期 CS0120）。
+    /// </summary>
+    public IReadOnlyDictionary<string, KismetCard> AllCards => _cards;
+
+    /// <summary>
     /// 按卡名 + 事件名取程序，例如 ("card_event_aans", "OnPlayedFromHand")。
     /// 卡组里的 <c>xxx_bal</c> / <c>xxx_vet</c> 是数据变体，蓝图逻辑挂在基础卡上，
     /// 所以找不到时剥掉后缀再试。

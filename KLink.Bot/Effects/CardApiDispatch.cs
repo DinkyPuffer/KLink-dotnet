@@ -62,7 +62,21 @@ public sealed partial class CardApi
             ["IsLocatedInDeck"] = (c, r, a) => SelfArg(c, r, a) is { } x && IsLocatedInDeck(x),
             ["IsSideActive"] = (c, r, a) => IsSideActive(SideArg(r, a, 0)),
             ["IsValid"] = (c, r, a) => AsCard(a.FirstOrDefault()) is not null || SelfArg(c, r, a) is not null,
-            ["IsCardReserved"] = (c, r, a) => false,           // TODO 待 BalancedCards 解出
+            // `IsCardReserved(InCardName, out IsReserved)` ——
+            // `BP_CardFunctions.g.cs:24131-24151` 只是把
+            // `NotifyCheckCardReserved(CardFunctionsNotifier, name)` 的答复原样转出；
+            // 真正的判据在 `BP_Logic.HandleCheckCardReserved` → `UtilityFunctions.isCardReserved`：
+            // 先扫服务端下发的 `DSession.cards_reserve_changes` 调档表，**没命中就回退到
+            // 卡自己的 CDO `isReserved` 字段**（`_deps/UtilityFunctions.g.cs:6651-6672`）。
+            // 本内核没有 DSession ⇒ 整表按 CDO 字段算，出处与偏差面见 `CardPoolTable.Reserved`。
+            //
+            // ⚠️ 这个值有**两个**用途，别只看第一个：
+            //   ① 卡自己的效果问"我这张卡被预备了吗"；
+            //   ② `GetAllActiveStaticCards(false, IsCardReserved(self.name), out cards)`
+            //      —— 它的返回值就是候选池的 `includeReserved` 开关
+            //      （例：`card_event_atlantic_convoy.g.cs:182-184`）。
+            //      原来恒 false ⇒ 预备卡永远进候选池（见 `StaticCardPool`）。
+            ["IsCardReserved"] = (c, r, a) => CardPoolTable.IsReserved(StrArgOrNull(a, 0)),
             ["IsForecastCard"] = (c, r, a) => false,            // TODO 未知语义
             ["HasIntel"] = (c, r, a) => SelfArg(c, r, a) is { } x && JsonGetBool(x, "intel"),
 
@@ -90,7 +104,47 @@ public sealed partial class CardApi
             ["HasCustomAbilityFromCard"] = (c, r, a)
                 => SelfArg(c, r, a) is { } x && HasCustomAbility(x, StrArgOrNull(a, 0)),
             ["DoesSideControlTheFrontline"] = (c, r, a) => DoesSideControlTheFrontline(SideArg(r, a, 0)),
-            ["IsSameSideUnit"] = (c, r, a) => a.Length >= 2 && AsCard(a[0]) is { } p && AsCard(a[1]) is { } q && IsSameSideUnit(p, q),
+            // ⚠️⚠️ 形状修正（2026-10-02）：`IsSameSideUnit` 是 **BaseCardObject 的成员函数**，
+            //     权威形状是 `Context{卡}.IsSameSideUnit(side)` —— **接收者才是被查的那张卡**，
+            //     唯一的实参是 `side`（int），第 2 项是 out 槽。
+            //
+            // 三层互相独立的证据：
+            // ① IR：19 个调用点**全部**是这个形状 —— `a[0]` = `{"var":"side"}`×14 /
+            //    `GetOppositeSide(...)`×5，`a[1]` = out 槽 `CallFunc_IsSameSideUnit_isIt`；
+            //    `recv` 全是卡变量（`K2Node_Event_cardPlayed`×7 / `CallFunc_GetCardFromID_card`×7 /
+            //    `K2Node_Event_cardDestroyed`×4 / `tempCard`×1）。
+            //    取证：`card-ir.json` 的 `card_location_british_scen4` i=4008/4027/4152。
+            // ② 直译产物：`out/Generated-gap/_deps/*.g.cs` 里 17 种不同的调用形状
+            //    **无一例外**是 `H.Call("IsSameSideUnit", [卡, side, out])`（直译器把接收者
+            //    前置成 args[0]）—— 全卡池**不存在** `(卡, 卡)` 形状。
+            // ③ 语义：`card_event_air_corps_ferrying.CanPlayFromHand` 的全部判据只有
+            //    `GetTargetedCard` + `IsSameSideUnit(target, side)`，失败时 reason 是
+            //    `"friendly_unit"`（卡面「Give a friendly unit +1+1」）⇒ 必须**同时**含
+            //    「同阵营」与「是单位」，只判阵营会放行非单位目标。
+            //
+            // 旧实现 `a.Length >= 2 && AsCard(a[0]) is {} p && AsCard(a[1]) is {} q && IsSameSideUnit(p, q)`
+            // 把两个实参都当卡读 ⇒ `a[0]` 是 int、`a[1]` 是 out 槽 ⇒ **19/19 恒 false**。
+            //
+            // 影响面（分「已生效」和「潜伏」两档，不要混为一谈）：
+            // · **已生效 19 个 IR 调用点 / 17 张卡**（`card-ir.json` 里能跑到的）——
+            //   `OnOtherCardEnterPlay`×6 / `OnOtherCardDestroyed`×4 / `OnOtherCardPlayedFromHand`×2 /
+            //   `OnEndOfTurn`×1 / 卡自己的函数体×6。例：`card_location_british_scen4` 的
+            //   `OnOtherCardEnterPlay` 两条改行动费分支恒跳过（i=4008→4027 / 4152）。
+            // · **潜伏 131 个调用点**：全字节码统计（`decompiled/cards.all.json`）
+            //   `IsSameSideUnit` 共 148 张卡 / 152 个调用点，其中 **131 个在 `CanPlayFromHand`**、
+            //   3 个在 `ShouldHighlightInHand` —— 而**本内核目前根本没有实现 `CanPlayFromHand`
+            //   这道客户端出牌合法性门**（全仓 grep 只有注释提到它）。所以那 131 处
+            //   现在跑不到；等哪天实现了那道门，这个修好之前它们会**一律拒绝**
+            //   （`card_event_air_corps_ferrying` 的卡面是「Give a friendly unit +1+1」，
+            //   门恒假 ⇒ 那张牌永远打不出去）。**修在这里，是为了那道门落地时不用再翻一遍。**
+            //
+            // ⚠️ 阵营**不做兜底**（不用 `SideArg`）：`SideArg` 读不到时会退回
+            //    `receiver.Owner`，那正好等于"卡属于它自己的阵营"⇒ 判据**恒真**。
+            //    "查 A 是否等于 B"这类原语，兜底值比没有值更危险。
+            ["IsSameSideUnit"] = (c, r, a)
+                => SideArgOrNull(a, 0) is { } side
+                   && SelfArg(c, r, a) is { } card
+                   && IsSameSideUnit(card, side),
 
             // ⚠️ **隐式 self**（审计 §5.1）。权威签名 `BaseCardObject.h:841`：
             //     `IsVeteran(bool ignoreSuppress, bool& isIt)` —— 零个"是哪张卡"的入参。
@@ -118,6 +172,13 @@ public sealed partial class CardApi
             //    「Deployment: 对敌方 HQ 造成 2 点伤害」完全不生效。
             ["GetOppositeSide"] = (c, r, a) => (int)SelfSide(c).Opposite(),
             ["GetCardFromID"] = (c, r, a) => GetCardFromID(IntArg(a, 0)),
+
+            // ⚠️ `GetStaticCard` **不在这里** —— 它是
+            // `/Script/kards.FunctionLibrary` 的原生函数，在 IR 里是 `CallMath` 形状，
+            // `KismetVm.Eval` 先判 `expr.Math` 就转进 `EvalMath` 了，
+            // 所以放进本表**永远不会被调用到**（那是「看起来实现了、其实没有」的坑）。
+            // 实现落点：`KismetVm.EvalMath` 的 `case "GetStaticCard"`。
+
             ["GetLocationCardBySide"] = (c, r, a) => GetLocationCardBySide(SideArg(r, a, 2)),
 
             // ⚠️ **可选参数必须读**。权威签名（`CardFunctionsStub.h:437`）：
@@ -155,7 +216,9 @@ public sealed partial class CardApi
                     : GetCardsOnBoardBySide(side).Concat(new[] { c.State.Hq(side) }).ToList();
             },
             ["GetCardsInHandBySide"] = (c, r, a) => GetCardsInHandBySide(SideArg(r, a, 0)).ToList(),
-            ["GetDeckByside"] = (c, r, a) => GetDeckBySide(SideArg(r, a, 0)).ToList(),
+            // ⚠️ 出参是 `TArray<int> deckCardIDs`（卡 **ID**），不是卡实例 ——
+            //    46 张调用它的卡的用法清单见 `CardApi.GetDeckBySide` 的注释。
+            ["GetDeckByside"] = (c, r, a) => GetDeckBySide(SideArg(r, a, 0)),
 
             // 权威签名（`CardFunctionsStub.h:455/464`）：
             //   `GetAllUnitsOnBoard(bool includeCovertCards, TArray& Cards)`
@@ -206,8 +269,59 @@ public sealed partial class CardApi
             ["getTotalDefense"] = (c, r, a) => SelfArg(c, r, a)?.Defense ?? 0,
             ["GetTurnNumber"] = (c, r, a) => GetTurnNumber(),
             ["GetRandomCard"] = (c, r, a) => GetRandomCard(AsList(a.FirstOrDefault())),
-            ["GetTargetedCard"] = (c, r, a) => c.Target,
+            // ⚠️⚠️ **两个出参，不是返回值**（2026-10-02，目标合法性门落地时发现）。
+            //
+            // 权威签名（调用点形态，全卡池 **431 处全部同形**）：
+            //   `GetTargetedCard(out bool hasTarget, out UBaseCardObject* card)`
+            // IR 形状（`card-ir.json` 的 438 个 `CanPlayFromHand` 里逐个核对过）：
+            //   `{"op":"call","fn":"GetTargetedCard","recv":{"var":"cardFunction"},
+            //     "args":[{"self":true}, {"var":"CallFunc_GetTargetedCard_hasTarget"},
+            //                          {"var":"CallFunc_GetTargetedCard_card"}],
+            //     "outs":[{"param":1,...},{"param":2,...}]}`
+            // —— 两个 out 槽，**没有**返回值。
+            //
+            // 旧写法 `=> c.Target` 只写第一个槽（`KismetVm.cs:650` 的单值约定）：
+            //   · `hasTarget` 拿到的是**卡对象**（truthy 恰好也对，掩盖了问题）；
+            //   · `card` 永远是 **null** ⇒ 紧接着的 `IsAirUnit(recv=card)` /
+            //     `IsVeteran(recv=card)` / `IsSameSideUnit(recv=card)` **一律恒假**。
+            // 因为 `GetTargetedCard` 只出现在 `CanPlayFromHand` 里，而那道门在本内核
+            // 此前**根本没实现**（`card-ir.json` 里 0 个调用点），所以这个 bug 一直没暴露；
+            // 一旦接上目标门，它的症状会是「**所有需要目标的牌都指不了任何目标**」。
+            // 多输出约定见 `KismetVm.cs:621-647`：返回 `object?[]` 即按下标写回各 out 槽。
+            ["GetTargetedCard"] = (c, r, a) => new object?[] { c.Target is not null, c.Target },
             ["GetCard"] = (c, r, a) => AsCard(r) ?? c.Target,
+
+            // ── ★★ `CanSelectAsTarget`（规则库的目标合法性门，2026-10-02）──────────
+            // 出处：`ref/kards-sim/KardsSim/Generated/_deps/cardsCheckFunctions.g.cs:1052-1219`
+            //（同一份规则库里还有 `CanAttack`，内核早已实现，两者共用 `CanBeTargetted`
+            //  这一族子门）。完整语义、以及**它管不到什么**见
+            //  `CardApi.CanSelectAsTarget` 的注释。
+            //
+            // 为什么它**不是**「目标类型」那道门：玩家报告的「只能指定空军 / 老兵」
+            // 不在这个函数里 —— 那在**每张卡自己的 `CanPlayFromHand`** 里
+            //（客户端选目标的主循环 `_deps/BP_Logic.g.cs:1235-1355` 就是
+            //  `targetOverride=候选 → CanPlayFromHand → CanSelectAsTarget`）。
+            // 两道门都要过，见 `CardApi.CanTarget`。
+            //
+            // ⚠️ 注册它**不会**改变派发表缺口的指纹：IR 里 `CanSelectAsTarget`
+            //    的调用点 = **0**（`card-ir.json` 全文 grep），所以 `DispatchGap.Compute`
+            //    的 `implemented.Contains(fn)` 分支根本不会碰到它。注册是为了让
+            //    「名字 → 实现」这件事在表里可查，不是为了让数字好看。
+            ["CanSelectAsTarget"] = (c, r, a) => InvokeCanSelectAsTarget(c, a),
+
+            // ── `AddKreditsTax(card, costToAdd, instigatorID, out qqq)`（3 张卡）──
+            // 出处：直译产物 `_deps/BP_CardFunctions.g.cs:403-438`（函数体全文）：
+            //   `IsValid(card)` → `Max(0, card.KreditsTax_AsEnemyTarget + costToAdd)`
+            //   → 写回 `card.KreditsTax_AsEnemyTarget` → `IsActionProcess` 为真时
+            //   `NotifyAddKreditsTax`（**纯客户端表现**，本内核没有 notifier，不实现）
+            //   → `qqq = False`（两个分支都写 False；调用点从不读它）。
+            //
+            // 为什么这个键属于本次修复：`CanSelectAsTarget` 的
+            // `cost_extra_to_target` 分支**读的就是这个字段**（`g.cs:1142/1180`）。
+            // 没有写方 ⇒ 那个分支恒不触发、字段恒 0 ⇒ 门是**死代码**。
+            // 调用它的 3 张卡：`card_event_order_of_the_day`(+1) /
+            // `card_event_grim_day`(+2/−2) / `card_unit_tupolev_sb_2`(+2/−2)。
+            ["AddKreditsTax"] = (c, r, a) => DoAddKreditsTax(c, a),
 
             // ⚠️ `GetPlayFromHandDamage` **不是**引擎的通用函数，它是**每张卡蓝图
             //    各自实现**的普通函数（编译成独立 export，不在 ubergraph 里）。
@@ -220,7 +334,10 @@ public sealed partial class CardApi
             ["GetPlayFromHandDamage"] = (c, r, a) => DoGetPlayFromHandDamage(c, AsCard(a.FirstOrDefault())),
 
             // ---- Develop 一族（见文件下半部「Develop（GetChooseSpawnCards 一族）」的注释）----
-            ["GetAllActiveStaticCards"] = (c, r, a) => StaticCardPool(c),
+            ["GetAllActiveStaticCards"] = (c, r, a) => StaticCardPool(
+                c,
+                includeNotAttainable: TruthyArg(a, 0),
+                includeReserved: TruthyArg(a, 1)),
             // 三个出参按调用点的顺序返回：[cards, markAsSeen, keepOrder]
             // （`BP_CardFunctions.selectCardToDraw` 的 L_0680 就是这个顺序）。
             // 多出参约定见 `KismetVm.ExecuteCall`：返回 object?[] 即按下标对应各 out 槽。
@@ -255,6 +372,22 @@ public sealed partial class CardApi
             ["ChangeOperationCost"] = (c, r, a) => DoChangeOperationCost(c, r, a),
             ["ChangeHeavyArmor"] = (c, r, a) => DoChangeHeavyArmor(c, r, a),
             ["DamageCard"] = (c, r, a) => DoDamageCard(c, r, a),
+            ["DamageMultipleCards"] = (c, r, a) => DoDamageMultipleCards(c, r, a),
+
+            // ★★ 2026-10-02 新增：`MakeCardsFight`（「让两个单位互斗」）—— 原先**表里没有这个键**。
+            //
+            // 为什么必须补：缺键 ⇒ `KismetVm.ExecuteCall` 什么都不做、只记一笔
+            // `UnimplementedCalls`（`KismetVm.cs:606-612`）⇒ 「互斗」整段效果**静默不发生**
+            // ⇒ 本该战死的单位没死 ⇒ **我方场上有客户端没有的单位**（玩家报的「虚空单位」）。
+            //
+            // 影响面：IR 里 12 个调用点 / 12 张卡（`card_event_chain_home`、
+            // `card_event_claim_the_skies`、`card_event_german_counterattack`、
+            // `card_event_hms_formidable`、`card_event_hull_down`、`card_event_sloped_armor`、
+            // `card_unit_113_schutzen`、`card_unit_40_royal_marine`、`card_unit_57th_rifles`、
+            // `card_unit_heinkel_he_219`、`card_unit_henschel_he_129`、`card_unit_panzer_iv_h`）。
+            // 实测 `replay-773639` 的 ⑥ 里就是 `MakeCardsFight ×1`。
+            ["MakeCardsFight"] = (c, r, a) => DoMakeCardsFight(c, a),
+            ["AddAttackUntilEndOfTurn"] = (c, r, a) => DoAddAttackUntilEndOfTurn(c, a),
             ["HealCard"] = (c, r, a) => DoHealCard(c, r, a),
             ["DestroyCard"] = (c, r, a) => DoDestroyCard(c, r, a),
             ["DrawCardsFromDeckBySide"] = (c, r, a) => { DrawCards(SideArg(r, a, 1, c.Controller), IntArg(a, 2, 1)); return null; },
@@ -272,7 +405,26 @@ public sealed partial class CardApi
             ["CustomAbilityAdd"] = (c, r, a) => DoCustomAbilityAdd(c, r, a),
             ["CustomAbilityRemove"] = (c, r, a) => DoCustomAbilityRemove(c, r, a),
             ["PersistCustomFields"] = (c, r, a) => { if (AsCard(r) is { } x) PersistCustomFields(x); return null; },
-            ["MakeVeteran"] = (c, r, a) => { if (AsCard(r) is { } x) MakeVeteran(x); return null; },
+            // ⚠️ 同形「接收者优先」bug（2026-10-02）：旧写法 `if (AsCard(r) is {} x) MakeVeteran(x)`
+            //    只认接收者，而 `r` 恒为 `cardFunction`（= `ctx.Self`，施法的那张牌自己）
+            //    ⇒ **永远把施法者自己变成老兵，目标从没被命中过**。
+            //
+            // IR 实测（`out/audit/target-shapes.py`）：45 个调用点，`a[0]` =
+            //   `{"self":true}`×42 —— 这 42 处 `a[0]` 恰好**就是** `ctx.Self`
+            //   （`KismetVm.Frame` 的 `_locals["self"]` 与 `_locals["cardFunction"]`
+            //   都取 `ctx.Self`），所以旧写法在这 42 处**碰巧等价**，把 bug 掩盖住了；
+            //   剩下 3 处 `a[0]` ≠ `ctx.Self`，全部静默打错卡：
+            //   · `card_unit_266th_guards_rifles` i=1026（`OnOtherCardPlayedFromHand`）：
+            //     `MakeVeteran(K2Node_Event_cardPlayed)` —— 该变老兵的是**被打出的那张牌**，
+            //     旧实现把 266 近卫步兵团自己变成老兵。
+            //   · `card_event_battle_valor` i=216（`OnPlayedFromHand`）：
+            //     `MakeVeteran(tempCard)` —— `tempCard` = `ctx.Target`，该变的是**目标**。
+            //   · `card_unit_179th_tomahawks` i=813（`OnStartOfTurn`）：
+            //     `MakeVeteran(GetCardFromID(spawnedCardID))` —— 该变的是**新生成的那张牌**。
+            //
+            // 用 `TargetArg`（先实参、再 `c.Target`、最后接收者）后，42 处 self 形状
+            // 解析结果**逐位不变**（`AsCardOrId(ctx.Self)` ≡ 旧 `AsCard(r)`），3 处修正。
+            ["MakeVeteran"] = (c, r, a) => { if (TargetArg(c, r, a) is { } x) MakeVeteran(x); return null; },
 
             // 关键字
             ["GiveBlitz"] = (c, r, a) => DoGiveKeyword(c, r, a, Keyword.Blitz),
@@ -292,9 +444,24 @@ public sealed partial class CardApi
             ["RemoveGuard"] = (c, r, a) => DoRemoveKeyword(c, r, a, Keyword.Guard),
             ["RemoveImmune"] = (c, r, a) => DoRemoveKeyword(c, r, a, Keyword.Immune),
             ["RemoveSmokescreen"] = (c, r, a) => DoRemoveKeyword(c, r, a, Keyword.Smokescreen),
-            ["PinUnit"] = (c, r, a) => DoGiveKeyword(c, r, a, Keyword.Pinned),
+            // ⚠️ `PinUnit` 不再直接走 `DoGiveKeyword` —— 它还要记**时长**
+            //    （`BP_CardFunctions::PinUnit` i=955 `pinnedTurns = Max(…, 3或2)`）。
+            //    走 `CardApi.PinUnit` 才能和 `UnpinUnit`/到期递减对上。
+            //    **派发键没变**（还是 "PinUnit"），只是换了实现。
+            ["PinUnit"] = (c, r, a) => DoPinUnit(c, r, a),
             ["UnpinUnit"] = (c, r, a) => DoRemoveKeyword(c, r, a, Keyword.Pinned),
             ["SuppressUnit"] = (c, r, a) => DoSuppressUnit(c, r, a),
+
+            // ★★ 2026-10-02 补：`SuppressMultipleUnits` **原来没有派发键** ⇒
+            //    直接调用它的两张卡的「抑制」是**静默空转**，这正是玩家报的「抑制不生效」：
+            //      · `card_event_white_death`（i=382）：「Suppress **all** enemy units.」
+            //      · `card_unit_38th_independent`（i=590 / i=2808）
+            //    证据：`klink bot/docs/card-ir.json` 里 `"fn":"SuppressMultipleUnits"`
+            //    共 3 个调用点；而 `SuppressUnit`（16 个调用点）**会转发到它**
+            //    —— `ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:36484`
+            //    `H.Call("SuppressMultipleUnits", {self, MakeArray([cardID]), instigatorID})`。
+            //    ⇒ 蓝图里**只有一条**实现路径，我们却只注册了外壳那一半。
+            ["SuppressMultipleUnits"] = (c, r, a) => DoSuppressMultipleUnits(c, r, a),
             ["AddHeavyArmor"] = (c, r, a) => DoGiveKeyword(c, r, a, Keyword.HeavyArmor),
 
             // 卡牌私有 JSON
@@ -320,24 +487,49 @@ public sealed partial class CardApi
             ["JSON_Clear"] = (c, r, a) => { if (AsCard(r) is { } x) JsonClear(x); return null; },
 
             // ---------------- 数组（卡牌蓝图里大量使用）----------------
-            ["Array_Length"] = (c, r, a) => EvalArray(r, a).Count,
-            ["Array_IsNotEmpty"] = (c, r, a) => EvalArray(r, a).Count > 0,
-            ["Array_IsEmpty"] = (c, r, a) => EvalArray(r, a).Count == 0,
-            ["Array_IsValidIndex"] = (c, r, a) => { int i = IntArg(a, 1); var arr = EvalArray(r, a); return i >= 0 && i < arr.Count; },
-            ["Array_Get"] = (c, r, a) => { int i = IntArg(a, 1); var arr = EvalArray(r, a); return i >= 0 && i < arr.Count ? arr[i] : null; },
+            // ⚠️ 这一族全部走 `EvalList`（**元素类型无关**），不是 `EvalArray`。
+            //    UE 的 `TArray<int>`（例 `GetDeckByside` 的 `deckCardIDs`）和
+            //    `TArray<UObject*>`（例 `GetCardsOnBoardBySide` 的 `Cards`）
+            //    在这里是同一个 VM 里的两种元素类型；只认后者的话，
+            //    ID 数组上的 `Array_Length` 会返回 0（循环整段被跳过）。
+            //    见 `CardApi.EvalList` / `GetDeckBySide` 的注释。
+            ["Array_Length"] = (c, r, a) => EvalList(r, a).Count,
+            ["Array_IsNotEmpty"] = (c, r, a) => EvalList(r, a).Count > 0,
+            ["Array_IsEmpty"] = (c, r, a) => EvalList(r, a).Count == 0,
+            ["Array_IsValidIndex"] = (c, r, a) => { int i = IntArg(a, 1); var arr = EvalList(r, a); return i >= 0 && i < arr.Count; },
+            ["Array_Get"] = (c, r, a) => { int i = IntArg(a, 1); var arr = EvalList(r, a); return i >= 0 && i < arr.Count ? arr[i] : null; },
             // ⚠️ 必须按**值**比，不能按引用比（原来是 `ReferenceEquals`，永远 false）。
             //    实测形状是 `Array_Contains(MakeArray(5,6,7), goingToLocation)` ——
             //    `card_unit_214th_amur` 用它判「离场去向是不是 [半场,前线]」。
             //    `goingToLocation` 是事件入参（byte/int），`MakeArray` 里是 `IntConst`，
             //    两边都是装箱的 int，`ReferenceEquals` 必然不成立，于是那个判据恒为假、
             //    整条还原分支被跳过。这里退化成「先引用、再数值」两级比较。
+            //
+            //    ⚠️⚠️ 2026-10-02：**被比较的项在 `a[1]`，不是 `a[0]`**。
+            //    `a[0]` 是**目标数组本身**（和 `Array_Get` 把下标放 `a[1]`、
+            //    `Array_Add` 把项放 `a[^1]` 同一套约定；`KismetVm.ExecuteCall`
+            //    明确不摘 `args[0]`，见那里的注释）。旧实现读 `a[0]`，
+            //    于是比的是「每个元素 vs 数组」→ `AsInt(数组)=0` →
+            //    对**卡实例数组**恒等于"数组非空就 true"、对**整数数组**恒等于"含 0 就 true"。
+            //    全卡池 **30 个调用点 / 22 张卡**全部是这个形状
+            //    （`card_unit_gordon_highlanders` i=114 `Array_Contains(AffectedCards, drawnCardID)`、
+            //     `card_unit_31e_algiers` i=1347、`card_unit_214th_amur` …）。
+            //    回归用例：`tools/BotSim/SelfTest.cs` 的 `GetDeckBySideReturnsCardIds`
+            //    第二条断言（`Array_Contains(deckCardIDs, cardID)`）。
+            //
+            //    2026-10-02：比较挪到 `SameArrayValue`，因为元素现在有两种表示 ——
+            //    卡实例与整数卡 ID。`Array_Contains(deckCardIDs, cardID)`
+            //    （`DrawSpecificCardFromDeckBySide` 内联体，
+            //      `out/Generated-gap/_deps/BP_CardFunctions.g.cs:12460`）
+            //    就是「整数数组 vs 整数」，而 `AsCardOrId` 那一族是「实例数组 vs 整数 ID」，
+            //    两种都必须命中。
             ["Array_Contains"] = (c, r, a) =>
             {
-                var arr = EvalArray(r, a);
-                var needle = a.Length > 0 ? a[0] : null;
-                foreach (var item in arr)
+                var arr = EvalList(r, a);
+                var needle = a.Length > 1 ? a[1] : null;
+                foreach (object? item in arr)
                 {
-                    if (ReferenceEquals(item, needle) || AsInt(item) == AsInt(needle))
+                    if (SameArrayValue(item, needle))
                     {
                         return true;
                     }
@@ -345,7 +537,7 @@ public sealed partial class CardApi
 
                 return false;
             },
-            ["Array_LastIndex"] = (c, r, a) => EvalArray(r, a).Count - 1,
+            ["Array_LastIndex"] = (c, r, a) => EvalList(r, a).Count - 1,
             // ⚠️ `Array_Add` / `Array_Clear` / `Array_Append` 在蓝图里是
             //    **原地修改目标数组**（目标按引用传进去，`Array_Add` 的返回值只是新元素下标）。
             //
@@ -367,34 +559,48 @@ public sealed partial class CardApi
             //    </code>
             //    目标 `PossibleCards` 是卡的实例变量（`instancevariable @path(owner=1)`），
             //    VM 侧由 `KismetVm.SeedArrayTarget` 给它一个稳定的空数组。
+            //
+            //    2026-10-02：目标数组现在可能是 `List<int>`（整数 ID 数组，例
+            //    `card_event_semper_fi` 的 `cardsToRandom = GetDeckByside(side)`）——
+            //    那种情况必须原样存**整数**，不能走 `AsCardOrId` 解析成卡实例，
+            //    否则元素类型和后续的 `Array_Get` / `RandomIntFromRangeWithStream` 对不上。
             ["Array_Add"] = (c, r, a) =>
             {
-                var arr = EvalArray(r, a);
-                if (a.Length > 0 && AsCard(a[^1]) is { } item)
+                var arr = EvalList(r, a);
+                if (a.Length > 0)
                 {
-                    arr.Add(item);
+                    ArrayAppendOne(c, arr, a[^1]);
                 }
 
                 return arr.Count - 1;
             },
             ["Array_Append"] = (c, r, a) =>
             {
-                var arr = EvalArray(r, a);
-                if (a.Length > 1 && a[1] is List<CardInstance> more)
+                var arr = EvalList(r, a);
+                if (a.Length > 1 && a[1] is System.Collections.IList more && !ReferenceEquals(more, arr))
                 {
-                    arr.AddRange(more);
+                    foreach (object? v in more)
+                    {
+                        ArrayAppendOne(c, arr, v);
+                    }
                 }
 
                 return null;
             },
-            ["Array_Clear"] = (c, r, a) => { EvalArray(r, a).Clear(); return null; },
+            ["Array_Clear"] = (c, r, a) => { EvalList(r, a).Clear(); return null; },
             // UE 的 `Array_Remove(目标数组, 项)` 按**值**删掉**所有**匹配项（原地）。
             ["Array_Remove"] = (c, r, a) =>
             {
-                var arr = EvalArray(r, a);
-                if (a.Length > 1 && AsCard(a[1]) is { } needle)
+                var arr = EvalList(r, a);
+                if (a.Length > 1)
                 {
-                    arr.RemoveAll(x => ReferenceEquals(x, needle) || x.CardId == needle.CardId);
+                    for (int i = arr.Count - 1; i >= 0; i--)
+                    {
+                        if (SameArrayValue(arr[i], a[1]))
+                        {
+                            arr.RemoveAt(i);
+                        }
+                    }
                 }
 
                 return null;
@@ -403,13 +609,16 @@ public sealed partial class CardApi
             // 之前没有这一项（进的是"未实现调用"榜，实测 4 次）。
             ["Array_RemoveItem"] = (c, r, a) =>
             {
-                var arr = EvalArray(r, a);
-                if (a.Length > 1 && AsCard(a[1]) is { } needle)
+                var arr = EvalList(r, a);
+                if (a.Length > 1)
                 {
-                    int at = arr.FindIndex(x => ReferenceEquals(x, needle) || x.CardId == needle.CardId);
-                    if (at >= 0)
+                    for (int i = 0; i < arr.Count; i++)
                     {
-                        arr.RemoveAt(at);
+                        if (SameArrayValue(arr[i], a[1]))
+                        {
+                            arr.RemoveAt(i);
+                            break;
+                        }
                     }
                 }
 
@@ -458,7 +667,7 @@ public sealed partial class CardApi
             //    （pams / bpf / the_rock_of_gibraltar / hampshire_regiment /
             //    2nd_west_africa 这些 Develop 类）的选牌因此全部落空。
             ["selectCardToDraw"] = (c, r, a) => SelectCardToDraw(c, r, a),
-            ["selectTargetFromHand"] = (c, r, a) => c.Target,
+            ["selectTargetFromHand"] = (c, r, a) => DoSelectTargetFromHand(c, r, a),
 
             // 三选一（`Choose One`）的分支：**读卡自己存的 `ChooseOne`**，
             // 由驱动在出牌时按动作流的 `PC[3]` 写进去（见 CardInstance.ChooseOne 的注释）。
@@ -541,6 +750,7 @@ public sealed partial class CardApi
                 var deck = c.State.Deck(side);
                 var order = deck.ToList();
                 c.State.Random.Shuffle(order);
+                c.State.TraceRandom($"ShuffleDeckBySide {side} n={order.Count}");
                 for (int i = 0; i < order.Count; i++)
                 {
                     order[i].LocationNumber = i;
@@ -587,6 +797,33 @@ public sealed partial class CardApi
             //    于是它会把每张手牌都"设成 4 费"，把已经被别的来源改过的牌也算进去。
             ["getTotalKreditCost"] = (c, r, a) => SelfArg(c, r, a)?.KreditCost ?? 0,
             ["getTotalOperationCost"] = (c, r, a) => SelfArg(c, r, a)?.OperationCost ?? 0,
+
+            // `getAndDecryptKredit` —— 「这张卡当前的费用」，和 `getTotalKreditCost` 同义。
+            //
+            // ## 为什么必须有它（2026-10-01，对局 508065 #36）
+            //
+            // 客户端把费用**加密**存在卡对象里，读的时候要"解密"，所以蓝图里到处是
+            // `getAndDecryptKredit(卡)` 而不是直接读字段。权威实现见
+            // `ref/kards-sim/KardsSim/Bridge/EngineHost.cs:1556`：
+            //     ["getAndDecryptKredit"] = (h, a) => Out(a, h.Card_(a[0])?.KreditCost ?? 0)
+            //
+            // 旧派发表**没有这个键** ⇒ 每次调用都记一笔 Unimplemented 并返回 null
+            // ⇒ 下游 `LessEqual_IntInt(null, 3)` 走 `ToInt(null) == 0` ⇒ **恒真**。
+            // 于是"按费用过滤"的卡全部退化成"不过滤"：
+            // `card_event_atlantic_convoy` 的候选池本该是「US 单位 + 总费 ≤ 3」，
+            // 实际变成**全部 363 张 US 单位**，随机抽出了 6 费的 `card_unit_tigercat`
+            // （卡面「At the end of your turn, add a SBD 3 DAUNTLESS to your support line.」）
+            // —— 它每回合往支援线塞一张轰炸机，把半场塞满，
+            // 连锁出 3 条「打不出：半场已满」（#55/#85/#123）。
+            //
+            // ## 调用形状（全 IR 52 个调用点 / 34 张卡，形状唯一）
+            //
+            // <code>
+            // recv = 卡（15× Array_Get 元素 / 10× tmpLoopCard / 5× tmpTarget / … / 4× 隐式 self）
+            // a[0] = 出参槽（`CallFunc_getAndDecryptKredit_decryptedKredit`）—— 不是实参
+            // </code>
+            // 也就是和 `getTotalKreditCost` **完全同形**，主语在接收者，走 `SelfArg`。
+            ["getAndDecryptKredit"] = (c, r, a) => SelfArg(c, r, a)?.KreditCost ?? 0,
             ["GetCombatKeywords"] = (c, r, a) =>
             {
                 // 战斗相关关键字列表（Guard/Blitz/Fury/…），供卡牌读取
@@ -608,7 +845,10 @@ public sealed partial class CardApi
             },
             ["GetAdjacentCards"] = (c, r, a) =>
             {
-                var card = AsCard(r) ?? AsCard(a.FirstOrDefault()) ?? c.Self;
+                // ⚠️ 必须用 `TargetArg`（**实参优先**）—— `r` 恒为 `cardFunction`
+                //    （施法的那张牌自己），用它算相邻会得到"施法方自己槽位 1 的单位"，
+                //    而不是目标周围。实测 `card_event_monty` 因此一个单位都没钉住。
+                var card = TargetArg(c, r, a);
                 if (card is null)
                 {
                     return new List<CardInstance>();
@@ -687,6 +927,164 @@ public sealed partial class CardApi
             // `Keyword.Immune`（`MatchEngine.ApplyDamage` 就读它），所以这里读同一个集合 ——
             // 语义一致，不是拿近似值顶替。
             ["getHasImmune"] = (c, r, a) => HasKeyword(c, r, a, Keyword.Immune),
+
+            // ══════════════════════════════════════════════════════════════════════
+            // 2026-10-02：补「IR 会调用、派发表里没有」的键（第一批）。
+            //
+            // 量化出处：`out/audit/missing-keys-classify2.py` / `.txt`（A/B/C 分类）。
+            //   · IR 里被调用的函数 **760** 种，派发表 **195** 键 ⇒ **608** 种不在表里；
+            //   · 其中 **63 种 / 148 调用点** 由 `KismetVm` 的 **locals 兜底**执行
+            //     （调用它的那张卡自己在 IR 的 `locals` 里带了这个函数体，
+            //      见 `KismetVm.cs:583` 那段与 `SelfTest.LocalFunctionActuallyRuns`）
+            //     ⇒ **不是缺口**；
+            //   · ⇒ **真缺口 545 种 / 3241 个调用点**。本段只补其中**语义有出处**的一批。
+            //
+            // ⚠️ 纪律：**语义不明的一律不补**。不补至少会在审计 ⑥
+            //    （`GameState.UnimplementedCalls`）里报警；补到语义不对的实现上是
+            //    **静默错**，比不补更糟。所以本段每条都带出处。
+            // ══════════════════════════════════════════════════════════════════════
+
+            // ── (B) 实现**已经在本仓库里**、只差一个键名 ──────────────────────
+            // 分类出处：`out/audit/missing-keys-classify2.txt` 的 (B) 段。
+            // B1：IR 名与我们的方法名不同 —— 出处见 `CardApi.DiscardCard` 的文档注释
+            //     （`CardApi.cs:1653`：「对应 BP_CardFunctions::DiscardCardFromHand / DiscardCard」）。
+            // 参数形状（IR 实测 39 个调用点，`out/audit/ir-callsites.py DiscardCardFromHand`）：
+            //     recv=cardFunction, a[0]=被弃的卡（**有时是卡对象、有时是整数 cardID**）,
+            //     a[1]=discarderID, a[2]/a[3]=bool（`skipTriggers`/`skipVisuals`）,
+            //     a[4]=out success。
+            ["DiscardCardFromHand"] = (c, r, a) => DoDiscardCardFromHand(c, r, a),
+
+            // B2：`CardApi.IsUnrevealedCovertCard`（`CardApi.cs:1194`）与
+            //     `MatchEngine.IsBomber`（`MatchEngine.cs:1529`）都是**同名现成方法**。
+            //     ⚠️ `IsUnrevealedCovertCard` 目前是**有意的恒 false 桩**（本内核没建模
+            //     Covert 的「已揭示/未揭示」位，理由见它自己的注释）；这里只是把名字接上，
+            //     **不改变任何行为**，目的是让它不再计进 `UnimplementedCalls`。
+            //     `IsBomber` 则是真修复：13 张卡用它做判据，以前 out 槽恒 null ⇒ 恒假。
+            // 形状（`IsBomber` 19 点 / `IsUnrevealedCovertCard` 28 点，全部同一形状）：
+            //     recv=被查的卡, a[0]=out —— 用 `SelfArg` 而不是 `AsCard(r)`，
+            //     因为这一族里有隐式 self 的调用点（同 `getHas*` 一族的前科，见上面注释）。
+            ["IsUnrevealedCovertCard"] = (c, r, a)
+                => SelfArg(c, r, a) is { } x && IsUnrevealedCovertCard(x),
+            ["IsBomber"] = (c, r, a) => SelfArg(c, r, a) is { } x && MatchEngine.IsBomber(x),
+
+            // ── 语义取自参考实现 `ref/kards-sim/KardsSim/Bridge/EngineHost.cs` ────
+            // 这一族的形状**完全一致**：`recv` = 被查的那张卡，`a[0]` = out 槽
+            // （逐个用 `out/audit/ir-callsites.py <名字>` 核过）。
+            // 为什么这些是**真修复**而不是"把计数器刷绿"：VM 在未处理时
+            // **什么都不写回 out 槽**（`KismetVm.cs:606-612`），布尔槽保持 null ⇒ 恒假、
+            // 整数槽保持 null ⇒ 恒 0。对"这张卡是战斗机吗 / 它攻击力多少"这种问题，
+            // 恒假/恒 0 是**错的**（`IsFighter` 15 点、`getAndDecryptAttack` 33 点）。
+            ["IsFighter"] = (c, r, a) => SelfArg(c, r, a) is { } x && x.Definition.Type == "fighter",
+            ["IsPinned"] = (c, r, a) => SelfArg(c, r, a) is { } x && x.Keywords.Contains(Keyword.Pinned),
+            ["HasBond"] = (c, r, a) => SelfArg(c, r, a) is { } x && x.Keywords.Contains(Keyword.Bond),
+            ["hasActivePincerEffect"] = (c, r, a)
+                => SelfArg(c, r, a) is { } x && x.Keywords.Contains(Keyword.Pincer),
+
+            // `getAndDecryptAttack` / `getAndDecryptDefense`：C++ 基类
+            // `UBaseCardObject::getAndDecryptAttack`（`BP_CardFunctions.g.cs:6647` 等 33 个调用点）。
+            // 参考实现 `EngineHost.cs:1098/1361` 直接返回卡的实时攻/防
+            // （"decrypt" 是隐蔽卡的显示解密，本内核没有独立揭示位，故等价于实时值）。
+            ["getAndDecryptAttack"] = (c, r, a) => SelfArg(c, r, a)?.Attack ?? 0,
+            ["getAndDecryptDefense"] = (c, r, a) => SelfArg(c, r, a)?.Defense ?? 0,
+
+            // `HasAttackLeft(out doesIt)` —— 客户端是 `attackLeft > 0`
+            // （`attackLeft` 回合开始被设成 `getHasFury() ? 2 : 1`，每次攻击 -1）。
+            //
+            // ⚠️ 旧实现写成 `!HasAttackedThisTurn`，并在注释里把它当"近似"记着
+            //    （参考实现 `EngineHost.cs:1288` 那句「Fury 之类多次攻击的卡由字段驱动」
+            //    被误读成了"不用建模"）。**那个近似是错的**：它让奋战的第二次攻击恒被拒。
+            //    实测对局 389594 `#85/#86 t19`：`card_unit_queens_own`（Fury）
+            //    同一回合打了两次右 HQ（动作流 19→12→5），内核拒了第二条。
+            //    判据与出处见 `CardInstance.HasAttackLeft` 的注释。
+            ["HasAttackLeft"] = (c, r, a) => SelfArg(c, r, a) is { } x && x.HasAttackLeft,
+
+            // `IsExile` —— 参考实现 `EngineHost.cs:1106` 就是**无条件 false**
+            // （注释：「放逐：引擎暂未建模，恒 false」）。本内核同样没建模 ⇒ 同语义。
+            // 这条是**行为中性**的（补不补都是假），补上只是为了让缺口计数反映真实情况。
+            ["IsExile"] = (c, r, a) => false,
+
+            // `getKreditBySide(side, out kredit)` / `GetFrontlineOwnerSide(out side)`
+            // 的接收者是 `GameStateRef` 而不是卡（IR 实测各 1 个调用点，都在 `BP_BoardCard`）。
+            // 参考实现：`EngineHost.cs:1862` / `:1962`。
+            ["getKreditBySide"] = (c, r, a) => c.State.Kredits(SideArgOrNull(a, 0) ?? SelfSide(c)),
+            ["GetFrontlineOwnerSide"] = (c, r, a) => (int)c.State.FrontlineOwner,
+
+            // ── ★ `SpawnCardInFrontline`（108 调用点 / 29 张卡）──────────────────
+            // 出处：直译产物 `out/Generated-gap/_deps/BP_CardFunctions.g.cs:35201`
+            //       （函数体只有一步）：
+            //   SpawnCardToBoard(card_name, side, 7=BoardFrontline, locationNumber, 0,
+            //                    gold, giveBlitz, spawnerID, 0, makeVeteran, out spawnedCardID)
+            // 参数顺序出处：同一函数体开头的 `args[i]` 绑定
+            //   （a[0]=card_name a[1]=side a[2]=spawnerID a[3]=out campaignName
+            //    a[4]=giveBlitz a[5]=out spawnedCardID a[6]=salvageFaction
+            //    a[7]=locationNumber a[8]=makeVeteran），与 IR 的 108 个调用点逐个吻合
+            //   （`out/audit/ir-callsites.py SpawnCardInFrontline`，例 `card_event_airdrop` i=219）。
+            // `gold` 那一支：函数体在 `campaignName` 为空且 `spawnerID > 0` 时取
+            //   `spawner.isGoldCard`；本内核有 `CardInstance.IsGold`，照做。
+            ["SpawnCardInFrontline"] = (c, r, a) => DoSpawnInFrontline(c, r, a),
+
+            // ── ★ `CustomName1*` / `CustomName2*` 一族（267 调用点）──────────────
+            // 语义出处：参考实现 `EngineHost.cs:1088/1307/1498-1500/1639`（含 `SuffixAdd`）。
+            // 作用：给一张卡挂「自定义名后缀」标记，之后用 `HasAttribute` 查。
+            // 例：`card_event_sea_embargo` / `card_unit_commando` 一族用它记
+            //     「这张牌被改造成了什么」。
+            // 本内核用 `CardInstance.CustomJson` 存（和客户端的私有 JSON 同一层），
+            // 键 `customName1` / `customName2`，值用逗号分隔 —— 与参考实现一致。
+            ["CustomName1Add"] = (c, r, a) => { SuffixAdd(c, r, a, "customName1"); return null; },
+            ["CustomName1HasAttribute"] = (c, r, a) => SuffixHas(c, r, a, "customName1"),
+            ["CustomName1Remove"] = (c, r, a) => { SuffixRemove(c, r, a, "customName1"); return null; },
+            ["CustomName2Add"] = (c, r, a) => { SuffixAdd(c, r, a, "customName2"); return null; },
+            ["CustomName2HasAttribute"] = (c, r, a) => SuffixHas(c, r, a, "customName2"),
+            ["CustomName2Remove"] = (c, r, a) => { SuffixRemove(c, r, a, "customName2"); return null; },
+            ["GetCustomName2Attributes"] = (c, r, a) => SuffixList(c, r, a, "customName2"),
+
+            // ── `GetCardsInSupportLineBySide(side, unitsOnly, includeCovert, out cards)`
+            //    （41 调用点 / 34 张卡）────────────────────────────────────────────
+            // 出处：直译产物 `_deps/BP_CardFunctions.g.cs` 的同名函数体（完整循环）：
+            //   遍历 `GetAllCardInBattle()`，
+            //   ① `card.side == side` ② `card.location == GetSupportLineBySide(side)`
+            //   ③ `!IsUnrevealedCovertCard(card) || includeCovertCards`
+            //   ④ `unitsOnly` 为真时再要求 `IsUnit(card)`
+            // 本内核里「半场」就是 `side.HqOf()`（`BoardHqLeft/Right`，见 `Enums.cs` 的注释），
+            // 所以 ② 直接等价；③ 恒真（`IsUnrevealedCovertCard` 是恒 false 的桩）；
+            // ④ 按参数过滤。**HQ 不算**：`GetAllCardInBattle` 含 HQ，但 HQ 也是 location 卡、
+            // 不是单位 ⇒ 只要 `unitsOnly` 为真就天然被 ④ 挡掉；为假时保留（与蓝图同）。
+            ["GetCardsInSupportLineBySide"] = (c, r, a) => DoGetCardsInSupportLine(c, r, a),
+
+            // ── `IsLocationFull(location, out isFull)`（20 调用点 / 17 张卡）────
+            // 出处：直译产物 `_deps/BP_CardFunctions.g.cs` 同名函数体 ——
+            //   唯一一步是 `FetchCardsByLocation(location, out QtyInLocation,
+            //   out isLocationFull, …)` 然后把 `isLocationFull` 转出去。
+            // 容量规则（`out/Generated-gap` 的 `FetchCardsByLocation` 体）：
+            //   前线 7 → `GameStateRef.FrontlineCapacity`（默认 5，有 limiter 时 2）；
+            //   半场 5/6 → `HalfBoardCapacity`（5，**含 HQ 占 1 格**）；
+            //   手牌 3/4 → `HandCapacity`（9）；牌库/弃牌堆 → 永不"满"。
+            ["IsLocationFull"] = (c, r, a) => DoIsLocationFull(c, r, a),
+
+            // ── `DestroyMultipleCards(cardsToDestroy, destroyerCardID, out)`（20 点）─
+            // 出处：直译产物同名函数体 —— 数组非空就调
+            //   `ApplyDestroyMultipleCards(self, destroyerCardID, out cardsToDestroy)`。
+            // `ApplyDestroyMultipleCards` 也是缺失键，本内核没有；但它做的事就是
+            // 「逐张 Destroy」。这里直接按顺序逐张 `DestroyCard`（同序，避免额外依赖）。
+            ["DestroyMultipleCards"] = (c, r, a) => DoDestroyMultipleCards(c, r, a),
+
+            // ── `DiscardCardFromDeck(cardID, discarderID, skipTriggers, skipVisuals, out)` ─
+            // 出处：直译产物同名函数体（`_deps/BP_CardFunctions.g.cs`）：
+            //   ① `cardID > 0` 且卡有效 ② 卡在牌库里（location 1/2）
+            //   ③ `OnAttemptedDiscard` 没取消 ④ `RemoveCardFromDeckBySide` +
+            //   `SetCardLocationAndLocNumber(cardID, 8=Discard, 0)` + `NotifyDiscardCard`。
+            // 本内核的 `DiscardCard` 做的就是「移到 Discard + 广播 `OnOtherCardDiscarded`」，
+            // 所以直接复用它（**不实现** `OnAttemptedDiscard` 的取消门 —— 本内核没有这个事件，
+            // 见「没修的」清单；这会少一次取消机会，不会多弃牌）。
+            ["DiscardCardFromDeck"] = (c, r, a) => DoDiscardCardFromDeck(c, r, a),
+
+            // ── `ShouldGotchaTrigger(triggerCard, out shouldIt)`（36 点 / 36 张卡）──
+            // 出处：参考实现 `EngineHost.cs:1348`：
+            //   只有**盖着的反制卡**（covert + `gotcha` 标记 + 未销毁）才响应。
+            // 本内核没有 `gotcha` 标记的写入方（见「没修的」清单），
+            // 所以这里如实返回 false 并**保留在缺口统计里**（不注册）——
+            // 注册成 false 只会把计数刷绿。**故意不注册**，等 gotcha 建模。
+            // ["ShouldGotchaTrigger"] = …（见 out/audit/没修的.md）
         };
 
     /// <summary>
@@ -771,8 +1169,16 @@ public sealed partial class CardApi
         //   旧实现把两条路混成一条（都当牌库实例），Develop 那一族的候选永远对不上。
         if (selectFromTopOfDeck)
         {
+            // 牌库族的候选 = 牌库里的实例（蓝图 `FilterCardsToScry` 取前 3 张）。
+            var deckCandidates = c.State.Deck(side).Take(3).ToList();
+
             CardInstance? chosen;
-            if (c.Engine.PickCardToDraw is { } pickDeck)
+            if (c.Engine.ChooseSpawnCard is { } chooseDeck)
+            {
+                // ★ bot 自己决策：把**候选表**给它（见 `ChooseSpawnCard` 的注释）。
+                chosen = chooseDeck(selecting, deckCandidates);
+            }
+            else if (c.Engine.PickCardToDraw is { } pickDeck)
             {
                 chosen = pickDeck(selecting, true, isEffect);
             }
@@ -788,10 +1194,32 @@ public sealed partial class CardApi
 
         // ---- Develop 族 ----
         // 候选表由**那张卡自己**的 `GetChooseSpawnCards` 算（每卡过滤条件不同）。
-        var candidates = GetChooseSpawnCards(c, selecting, out _, out _);
+        var candidates = GetChooseSpawnCards(c, selecting, out _, out bool keepOrder);
+
+        // ⚠️ **`keepOrder` 为假时蓝图会先洗一遍候选表，本内核故意不做**（2026-10-02 实测否决）：
+        //    `BP_CardFunctions::selectCardToDraw` 的 L_08C6
+        //    （`ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:33783`）确实是
+        //    `Array_ShuffleFromStream(possibleChooseCards, cardsRandomStream)`，
+        //    我按"游标必须对齐"的理由实现过一次 —— **结果整体变差**：
+        //    人类失败 13 → 22、应用 395/417 → 386/417，`773639` 更是从 0 条人类失败
+        //    退回到 5 条。说明**我们这边的 `keepOrder` 判定与客户端不一致**
+        //    （我们算成 false、客户端算成 true，或反之），照做等于往游标里塞多余的消费。
+        //    ⇒ 在把 `keepOrder` 的来源查清之前，**不加**这一次消费。
+        //    （回放路径本来也不需要它：答复自带卡名，不依赖候选表的顺序。）
+        _ = keepOrder;
 
         CardInstance? picked;
-        if (c.Engine.PickCardToDraw is { } pickDevelop)
+        if (c.Engine.ChooseSpawnCard is { } chooseDevelop)
+        {
+            // ★ bot 自己决策：拿到**候选表**，可以真正择优（见 `ChooseSpawnCard` 的注释）。
+            //
+            // 这条分支原先**不存在** ⇒ bot 的开发牌走下面 `PickCardToDraw`，
+            // 而那个答复源在 bot 自己回合里永远是空的 ⇒ `return 0`
+            // ⇒ **整张开发牌什么都不做**（实测症状：客户端收不到 `CS`、
+            //    手牌也没多出选中的牌）。
+            picked = chooseDevelop(selecting, candidates);
+        }
+        else if (c.Engine.PickCardToDraw is { } pickDevelop)
         {
             // 有答复源（回放路径）：答复只可能来自动作流。
             // ⚠️ 取不到时**什么都不生成**，返回 0 —— 蓝图在"候选为空"时也是这条路径
@@ -811,6 +1239,25 @@ public sealed partial class CardApi
         if (picked is null)
         {
             return 0;
+        }
+
+        // ★ 留痕：把「哪张卡选、选了第几个候选、选中哪个码」记下来，
+        //   好让 `BotTurnService` 产出一条 `CS` 动作发给客户端。
+        //
+        // 没有这一步，客户端**收不到任何选择** ——
+        // 表现成用户报的「AI 不会选开发」（2026-10-02 从真回放查出来的）。
+        {
+            int idx = candidates.FindIndex(x => ReferenceEquals(x, picked));
+            if (idx < 0)
+            {
+                idx = candidates.FindIndex(x => x.Name == picked.Name);
+            }
+
+            string? code = c.State.Database.DeckCodeFor(picked.Name);
+            if (idx >= 0 && !string.IsNullOrEmpty(code))
+            {
+                c.Engine.RecordPick(selecting.CardId, idx, code, picked.Name);
+            }
         }
 
         // 答复指向的必须是**卡池模板**（`CardId == 0`、不在对局里）——
@@ -862,22 +1309,128 @@ public sealed partial class CardApi
         return chosen;
     }
 
+    /// <summary>
+    /// `selectTargetFromHand` —— 「**从手牌里挑一张**」。
+    ///
+    /// 用它的典型卡是 `card_unit_gordon_highlanders`：
+    /// 「Deployment: Choose an order in hand. Set its cost to 0 and put it on top of your deck.」
+    ///
+    /// ## ⚠️ 旧实现是空壳
+    ///
+    /// <code>
+    /// ["selectTargetFromHand"] = (c, r, a) => c.Target,   // ← 什么都不做
+    /// </code>
+    ///
+    /// 既不问玩家、也不触发 `OnHandTargetSelected`。而客户端那边会发一条
+    /// `HT`（`XActionHandTargetSelected`）说明选了哪张 —— 我们的 `ReplayRunner`
+    /// **也没处理 `HT`**。两条路都断 ⇒ 那张手牌**既没被设成 0 费、也没回牌库**。
+    ///
+    /// **实测**（雪雾 2026-10-01，对局 781364）：
+    /// <code>
+    /// #155 t25 L PC  {"0":"10", …}   card_unit_gordon_highlanders
+    /// #156 t25 L HT  {"0":"10","1":"7"}      ← 选了手牌 7
+    /// #157 t25 L PC  …                        ← 从 t25 起状态漂开
+    /// </code>
+    /// 之后 t27 一片动作应用失败（移动被拒、半场已满…）。
+    ///
+    /// ## 契约
+    ///
+    /// 与 `DrawChosenCardToHand` 一致：选中后对**被选中的卡**派发
+    /// `OnHandTargetSelected(chosen.CardId, selecting.CardId)`
+    /// （事件契约 `docs/event-contracts.json`：`[Int handTargetCardID, Int instigatorID]`）。
+    /// `gordon_highlanders` 自己的 `OnHandTargetSelected` 程序就在这次广播里跑，
+    /// 做 `ChangeKreditCost` + `MoveCardToTopOfOwnersDeck`。
+    /// </summary>
+    private object? DoSelectTargetFromHand(EffectContext c, object? r, object?[] a)
+    {
+        var selecting = AsCard(r) ?? c.Self;
+        if (selecting is null)
+        {
+            return null;
+        }
+
+        // 候选 = 手牌里的**指令**。
+        // 卡面明确写 "Choose an **order** in hand"；把单位也放进候选会让
+        // 后续的 `ChangeKreditCost` / `MoveCardToTopOfOwnersDeck` 落到错的卡上。
+        var hand = c.State.Hand(selecting.Owner)
+            .Where(x => string.Equals(x.Definition.Type, "order", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (hand.Count == 0)
+        {
+            return null;   // 手里没指令 —— 蓝图在这种情况下也是整段跳过
+        }
+
+        CardInstance? chosen;
+        if (c.Engine.ChooseHandTarget is { } botPick)
+        {
+            chosen = botPick(selecting, hand);
+        }
+        else if (c.Engine.PickHandTarget is { } replayPick)
+        {
+            chosen = replayPick(selecting, hand);
+        }
+        else
+        {
+            chosen = hand[0];   // 兜底：第一张（自对弈路径）
+        }
+
+        if (chosen is null)
+        {
+            return null;
+        }
+
+        // 留痕 —— `BotTurnService` 靠它产出 `HT` 发给客户端。
+        c.Engine.RecordHandTargetPick(selecting.CardId, chosen.CardId);
+
+        FireTrigger("OnHandTargetSelected", selecting, selecting.Owner,
+                    eventArgs: new object?[] { chosen.CardId, selecting.CardId },
+                    eventSubject: chosen);
+
+        return chosen;
+    }
+
     /// <summary>从牌库中找出指定卡并抽到手牌（对应 DrawSpecificCardFromDeckBySide）。</summary>
     private object? DoDrawSpecific(EffectContext c, object? r, object?[] a)
     {
-        // 实参形状（实测 2 个调用点，完全一致）：
-        //     DrawSpecificCardFromDeckBySide(cardID, 目标卡.cardID, side, bool)
+        // 实参形状（实测 46 个调用点，完全一致）：
+        //     DrawSpecificCardFromDeckBySide(instigatorID, 目标卡.cardID, side, bool)
         //   → **side 在 index 2**，不是 0。index 0 是 instigatorID（整数），
         //     `SideArg` 只认 1/2，instigatorID 恰好是 1 或 2 时会**匹配到错误的阵营**，
         //     也就是"抽对手的牌库"。这种错误不报错、只会静默抽错人。
+        //
+        // ★ 2026-10-02 修：`a[1]` **永远是卡 ID（整数）或卡实例**，从来不是
+        //   `"card_xxx"` 字符串字面量 —— IR 实测 46 个调用点的 `a[1]` 形状分布：
+        //     `MEMBER(cardID)`（即 `某张卡.cardID`）×38、`VAR(cardID)`×5、
+        //     `VAR(tmpCard)` / `VAR(cardFound)` / `VAR(cardToDraw)` 各 1 —— **0 个是名字字面量**。
+        //   而旧实现只调 `FindCardNameArg`（判据是「以 `card_` 开头的**字符串**」）
+        //   ⇒ **46 个调用点全部返回 null ⇒ 一个都不抽**。
+        //   这就是"不报错、只是什么都不做"的语义错：它在派发表里 ⇒
+        //   **不计入「未实现原语」**，烟雾测试只看到「零变化」，一直没被发现。
+        //   实测症状（`out/audit/smoke-all-cards.tsv`）：调用它的 41 张卡里
+        //   **27 张状态零变化**，含卡面极明确的
+        //   `card_event_arctic_convoy`「Draw two random units from your deck.」
+        //   （它确实调了 `GetRandomCard`、消耗了 2 次随机数，却什么都没抽上来）。
         var side = SideArg(r, a, 2, c.Controller);
-        string? cardName = FindCardNameArg(c, a);
+
+        // 先按 a[1] 解析（ID / 实例 / 名字字面量都能认），认不出来再退回原来的全参数扫名。
+        CardInstance? byId = a.ElementAtOrDefault(1) switch
+        {
+            CardInstance inst => inst,
+            int id when id > 0 => c.State.ById(id),
+            _ => null,
+        };
+
+        string? cardName = byId?.Definition.Name ?? FindCardNameArg(c, a);
         if (cardName is null)
         {
             return null;
         }
 
-        var match = c.State.Deck(side).FirstOrDefault(x => x.Name == cardName || x.Definition.Name == cardName);
+        // 能按 ID 定位就按 ID 定位（牌库里可能有同名多张，按名字取第一张会拿错实例）。
+        CardInstance? match = byId is not null && c.State.Deck(side).Contains(byId)
+            ? byId
+            : c.State.Deck(side).FirstOrDefault(x => x.Name == cardName || x.Definition.Name == cardName);
         if (match is null)
         {
             return null;
@@ -888,8 +1441,45 @@ public sealed partial class CardApi
     }
 
     /// <summary>
-    /// 往牌库里生成一张卡。
-    /// 参数形状：<c>(side, 卡名, ..., 位置枚举, out card)</c> —— 卡名是第一个以 card_ 开头的字符串。
+    /// 往牌库里生成卡。
+    ///
+    /// 权威签名（`ref/kards-sim/KardsSim/Generated/_index.g.cs`）：
+    /// <code>
+    /// SpawnCardInDeckBySide(side, card_name, spawnerID, numberOfCards, salvageFaction,
+    ///                       HideFromOpponent, bottom, shuffle, SkipDrawAnimation,
+    ///                       RandomWithoutShuffle, out spawnedCardIDs)
+    /// </code>
+    /// 蓝图体（同目录 `BP_CardFunctions.g.cs` 的 `SpawnCardInDeckBySide`）：
+    /// <code>
+    /// Temp_int_Variable = 1
+    /// while (Temp_int_Variable &lt;= numberOfCards)      ← ★ **真的循环 numberOfCards 次**
+    ///     CreateCard(side, card_name, 牌库, locNum=0, …)
+    ///     AddCardToDeckBySide(side, cardID, Not(bottom), SelectInt(rand, -1, RandomWithoutShuffle))
+    ///     Temp_int_Variable++
+    /// if (shuffle) ShuffleDeckBySide(side, …)
+    /// </code>
+    ///
+    /// ⚠️ **`numberOfCards` 以前被整个忽略**（只建 1 张）。实测
+    /// `card_event_fog_of_war`（IR i=95）传的就是 `int 2`，卡面写着
+    /// 「Put **two** copies on top of owner's deck.」—— 对局 `773639` `#29 t7`
+    /// 那张雾战因此少塞了 1 张。
+    ///
+    /// ⚠️ **仍未修（如实记录，别当成已实现）**：
+    /// <list type="bullet">
+    /// <item><c>bottom</c>（a[6]）/ <c>shuffle</c>（a[7]）是**两个 bool**，
+    ///   而这里用的是「扫到某个 int 等于 2 就当放牌库顶」的旧启发式 ——
+    ///   在 `numberOfCards == 2` 时碰巧对，`numberOfCards == 1`（28 个调用点里 21 个）
+    ///   时会把本该放**顶**的卡放到**底**。没改是因为它会同时挪动 19 个调用点的落点，
+    ///   需要单独一轮对拍归因。</item>
+    /// <item><c>RandomWithoutShuffle</c>（a[9]）为假时，蓝图按
+    ///   `RandomIntegerInRangeFromStream(0, 牌库数)` 把卡插到**随机位置**；
+    ///   这里只做顶/底两档。</item>
+    /// </list>
+    ///
+    /// ★ 出参 <c>spawnedCardIDs</c> **已经改成数组**（2026-10-02，见函数末尾的注释）：
+    /// 它是 <c>TArray&lt;int32&gt;</c> 卡 ID，旧实现返回单张卡 ⇒
+    /// 三个真实读者（`card_event_colossus` i=337 / **`card_unit_meteor` i=577** /
+    /// `card_event_imperial_weapon_no_2` i=451）的 <c>Array_Length</c> 恒 0、整段循环被跳过。
     /// </summary>
     private object? DoSpawnInDeck(EffectContext c, object? r, object?[] a)
     {
@@ -898,6 +1488,13 @@ public sealed partial class CardApi
         if (cardName is null)
         {
             return null;
+        }
+
+        // `numberOfCards` 在 a[3]（蓝图签名第 4 个参数）。取不到时按 1 —— 与旧行为一致。
+        int count = IntArg(a, 3, 1);
+        if (count < 1)
+        {
+            count = 1;
         }
 
         var deck = c.State.Deck(side).ToList();
@@ -910,19 +1507,80 @@ public sealed partial class CardApi
             }
         }
 
-        if (toBottom)
+        CardInstance? last = null;
+        var spawned = new List<int>();
+        for (int n = 0; n < count; n++)
         {
-            var card = c.State.Create(cardName, side, side.DeckOf(), c.State.NextLocationNumber(side, side.DeckOf()));
-            return card;
+            if (toBottom)
+            {
+                last = c.State.Create(cardName, side, side.DeckOf(),
+                                      c.State.NextLocationNumber(side, side.DeckOf()));
+            }
+            else
+            {
+                // 放到牌库顶：把现有牌整体后移一位
+                foreach (var existing in deck)
+                {
+                    existing.LocationNumber++;
+                }
+
+                last = c.State.Create(cardName, side, side.DeckOf(), 0);
+            }
+
+            // ★★ **必须消耗这一个随机数** —— 它是「随机效果与客户端不一致」这一类
+            //    在**消费点**上的第二个独立成因（第一个是 RNG 算法本身）。
+            //
+            // 蓝图 `BP_CardFunctions::SpawnCardInDeckBySide`（`spawnerID > 0` 分支，
+            // `ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:34856-34867`）：
+            // <code>
+            //   CreateCard(...)                                   // L_0173 先建卡
+            //   GetDeckByside(side) → deckCardIDs                 // L_0225
+            //   len  = Array_Length(deckCardIDs)                  // L_0245（**含**刚建的这张）
+            //   rand = RandomIntegerInRangeFromStream(stream, 0, len)   // L_0280 ★ 每次生成都消耗
+            //   pos  = SelectInt(rand, -1, RandomWithoutShuffle)  // L_02B3
+            //   AddCardToDeckBySide(side, cardID, Not(bottom), pos)// L_0303
+            // </code>
+            // 注意 `rand` 是**无条件**算出来的（`SelectInt` 只是决定用不用它），
+            // 所以只要走了这条生成路径，每个生成的卡都恰好消耗 1 个随机数。
+            //
+            // 漏掉它会怎样（实测 773639 `#10 t3`，人类打 `card_event_colossus`）：
+            // 「Copy three random orders in the enemy deck」连抽 3 次，
+            // 每次抽完 `SpawnCardInDeckBySide` 都要消耗 1 个 —— 我们一个都没消耗
+            // ⇒ 游标**落后 1**，第二次抽签起全部错位。实测内核抽到
+            // `[iron_from_north, iron_from_north, baker_street]`，
+            // 而客户端（动作流揭示的 3001/3002）是 `[iron_from_north, royal_research, …]`
+            // —— 第一次对、第二次就不对了，正是"落后 1"的特征。
+            int deckLen = c.State.Deck(side).Count;
+            int rand = c.State.Random.RandRange(0, deckLen);
+            c.State.TraceRandom($"SpawnCardInDeckBySide {side} deckLen={deckLen} rand={rand} " +
+                                $"-> #{last.CardId} {cardName}");
+
+            spawned.Add(last.CardId);
         }
 
-        // 放到牌库顶：把现有牌整体后移一位
-        foreach (var existing in deck)
-        {
-            existing.LocationNumber++;
-        }
-
-        return c.State.Create(cardName, side, side.DeckOf(), 0);
+        // ★★ 出参必须是**数组**（`TArray<int32>` 的卡 ID），不是单张卡。
+        //
+        // 蓝图签名（`ref/kards-sim/KardsSim/Generated/_index.g.cs:4336`）：
+        //   `SpawnCardInDeckBySide(side, card_name, spawnerID, numberOfCards, salvageFaction,
+        //    HideFromOpponent, bottom, shuffle, SkipDrawAnimation, RandomWithoutShuffle,
+        //    out TArray<int32> spawnedCardIDs)`
+        // —— 名字里的 `IDs` 就是"整数卡 ID 数组"，读者一律先 `Array_Length`、
+        // 再 `Array_Get` 取元素，取到的是**卡 ID**（不是卡实例）。
+        //
+        // 旧实现返回**单张 CardInstance**，后果是整段循环被跳过：
+        //   `Array_Length(卡实例)` = 0（`KismetVm.EvalMath` 的 `Array_Length` 只认
+        //   `ICollection`）、`Array_Get` 也取不到 —— 循环体一次都不执行。
+        //
+        // 实测（对局 389594，任务 A 的那 1 点 HQ 差）：
+        //   `card_unit_meteor` 的 `OnAfterAttack`（`card_unit_meteor` IR i=929→i=1017→i=577）
+        //   是「移除自己 → `SpawnCardInDeckBySide` 生成一张同名卡 →
+        //   **循环把新卡的攻/防设成 `attTotal*2` / `defTotal*2`**」。
+        //   循环被跳过后，生成的副本还是 **1/1**，客户端那边是 **2/2**：
+        //   t7 `#32` 用 1/1 的 `meteor#14` 打完生成 `#7001`（我们 1/1、客户端 2/2）
+        //   → t15 `#71` 人类打出 `#7001`、`#72` 打右 HQ：客户端 21→**19**（2 点），
+        //     我们 21→20（1 点）⇒ `#73` 起 HQ 校验和全程差 1。
+        //   t15 再生成的 `#15001` 同理（我们 1/1，客户端应为 4/4）。
+        return spawned;
     }
 
     /// <summary>
@@ -1013,23 +1671,31 @@ public sealed partial class CardApi
     ///
     /// 真实实现在 `BP_CardFunctions.GetAllActiveStaticCards`
     /// （`ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:19104-19338`）：
-    /// 遍历 `GameStateRef.GetAllStaticCardsSortedByName()`，按
-    /// ① 卡集（`cardSet` 1..10/12/13/15..20 保留，21 要看 `isCardSetConfigActive`，
-    ///   其余只在 `includeNotAttainable` 为真时保留）、
-    /// ② `includeReserved` 为假时过 `NotifyCheckCardReserved`、
-    /// ③ `NotifyCheckCardBlacklisted`
-    /// 三层过滤。
+    /// 遍历 `GameStateRef.GetAllStaticCardsSortedByName()`，按三层过滤：
+    /// <list type="number">
+    /// <item>卡集（`cardSet`）：见 <see cref="CardPoolTable.IsSetInPool"/> ——
+    ///   1/8/9/10/12/13/15/16/17/18/19/20 直接保留；21 看 `isCardSetConfigActive(21)`；
+    ///   2..7 只在 `includeNotAttainable` 为真时保留；0/11/14/其余**无条件剔除**。</item>
+    /// <item>`includeReserved` 为假时过 `NotifyCheckCardReserved`（= `IsCardReserved`）；</item>
+    /// <item>`NotifyCheckCardBlacklisted`（服务端 `DSession.cards_blacklist`，离线恒空）。</item>
+    /// </list>
     ///
-    /// ⚠️ **本内核的近似（明确记下来，别当成复刻）**：
-    /// 我们**没有建模卡集/黑名单/`BalancedCards`**，所以这里返回**整个卡库**
-    /// （`CardDatabase.All`，2021 张），只做"按卡名排序"这一步。
-    /// 后果：候选表里可能多出几张真实客户端会滤掉的卡（战役/未获得卡集）。
-    /// 对**回放路径**没有影响 —— 回放里"选中哪张"来自动作流自带的卡组码；
-    /// 对**自对弈路径**有影响（自对弈的兜底选择会在这份更宽的候选表里挑）。
-    /// `IsCardReserved` 目前是恒 false 的桩（见上面的派发表），
-    /// `NotifyCheckCardBlacklisted` 没有对应物 —— 这两条都**没有**实现。
+    /// ## 历史（2026-10-02 修正）
+    ///
+    /// 这里原来**直接返回整个卡库**（2021 张），只做"按卡名排序"，并在注释里把
+    /// 「卡集 1..10/12/13/15..20 保留」记成了近似 —— 那个记法本身是**错的**：
+    /// 反编译里只有 2..7 走 `includeNotAttainable` 门控，15..20 是无条件保留的
+    /// （对照 `BP_CardFunctions.g.cs:19238-19260`：`!=15/16/17/18/19/20` 四个分支的
+    /// 跳转目标全是 `L_01F0`，只有 `!=2..7` 跳 `L_08CC`）。
+    /// 后果：候选池里混进了 **Special / OnlySpawnable / Placeholder / Expansion1 /
+    /// Wildcards** 五个卡集的 472 张卡，以及 563 张预备卡。
+    ///
+    /// 为什么这件事会直接改变抽卡结果：`CardApi.GetRandomCard` 的下标是
+    /// `RandomIntegerInRangeFromStream(0, pool.Count-1)`（`CardApi.cs:2255`）——
+    /// 池子大小一变，**同一个流位置算出的下标就变**，取到的卡就变。
     /// </summary>
-    private List<CardInstance> StaticCardPool(EffectContext c)
+    private List<CardInstance> StaticCardPool(
+        EffectContext c, bool includeNotAttainable, bool includeReserved)
     {
         var db = c.State.Database;
         if (!ReferenceEquals(_staticPoolDb, db) || _staticPool is null)
@@ -1045,16 +1711,46 @@ public sealed partial class CardApi
 
             // ⚠️ 卡池一换，按卡名缓存的候选表就全部失效（候选表里的元素就是这些模板实例）。
             _staticPoolGeneration++;
+            _staticPoolVariants.Clear();
             _gcsCache.Clear();
             _gcsPurityCache.Clear();
         }
 
+        // 两个开关的组合只有 4 种，且**整局都是常量**（调用点的实参是字面量 +
+        // `IsCardReserved(这张卡的名字)`）⇒ 变体表全局缓存，元素仍与不缓存时同一批实例。
+        var key = (includeNotAttainable, includeReserved);
+        if (!_staticPoolVariants.TryGetValue(key, out var filtered))
+        {
+            filtered = new List<CardInstance>(_staticPool.Count);
+            foreach (var card in _staticPool)
+            {
+                if (!CardPoolTable.IsSetInPool(card.Definition.CardSet, includeNotAttainable))
+                {
+                    continue;
+                }
+
+                if (!includeReserved && CardPoolTable.IsReserved(card.Name))
+                {
+                    continue;
+                }
+
+                filtered.Add(card);
+            }
+
+            _staticPoolVariants[key] = filtered;
+        }
+
         // 每次返回一份新的 List（调用方会 Array_Clear / Array_Add 原地改它）
-        return new List<CardInstance>(_staticPool);
+        return new List<CardInstance>(filtered);
     }
 
     private static CardDatabase? _staticPoolDb;
     private static List<CardInstance>? _staticPool;
+
+    /// <summary>
+    /// `(includeNotAttainable, includeReserved)` → 过滤后的卡池（元素是 <see cref="_staticPool"/> 的模板实例）。
+    /// </summary>
+    private static readonly Dictionary<(bool, bool), List<CardInstance>> _staticPoolVariants = new();
 
     /// <summary>卡池代数 —— 每次重建 <see cref="_staticPool"/> 时 +1，用来判定缓存条目是否过期。</summary>
     private static int _staticPoolGeneration;
@@ -1107,6 +1803,10 @@ public sealed partial class CardApi
         "IsLocatedOnBoard", "IsLocatedInHand", "IsVeteran", "IsDamaged", "IsBuffed",
         "IsGroundUnit", "IsForecastCard", "IsForecasted",
         "getTotalKreditCost", "getTotalOperationCost", "getTotalAttack", "getTotalDefense",
+        // `getAndDecryptKredit` 与 `getTotalKreditCost` 同义（都只读卡自己的费用字段），
+        // 是纯读 —— 不列进来会让"用解密费用做判据"的那些 `GetChooseSpawnCards`
+        // 被判成不可缓存（`IsPoolPureProgram` 要求**每个**原语都在本表里）。
+        "getAndDecryptKredit",
         "getTotalHeavyArmor", "getHasGameplayTag",
         "JSON_GetBool", "JSON_GetInt", "JSON_GetString", "JSON_GetIntArray",
         // 局部数组操作（`PossibleCards` 这种程序内数组，不碰对局）
@@ -1546,12 +2246,30 @@ public sealed partial class CardApi
 
     /// <summary>
     /// `RandomIntFromRangeWithStream(minimum, maximum, out randomResult)` ——
-    /// 返回 `[minimum, maximum)` 的均匀整数（签名见
-    /// `ref/kards-sim/KardsSim/Generated/_index.g.cs:4182`）。
-    /// 走对局的确定性随机流（`GameState.Random`），保证同种子同结果。
+    /// **闭区间** `[minimum, maximum]` 的均匀整数。
+    ///
+    /// ⚠️ **这条以前写错了，是「随机效果与客户端不一致」的第二个独立成因**：
+    /// 旧注释/旧实现按**半开区间** `[minimum, maximum)` 处理
+    /// （`c.State.Random.Next(min, max)`），于是 `RandomIntFromRangeWithStream(0, 2)`
+    /// 只会出 0/1，而客户端会出 0/1/2。
+    ///
+    /// 权威判据（两条独立互证）：
+    /// 1. 这个函数在蓝图里是**一行转发**
+    ///    （`ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:29203-29224`）：
+    ///    `RandomIntegerInRangeFromStream(cardsRandomStream, minimum, maximum)` —— 直接透传。
+    /// 2. `RandomIntegerInRangeFromStream` 的 IDA 反编译
+    ///    （`Kards_RNG_report` 的 `Weather.md` §4.2，地址 `0x143ddce50`）：
+    ///    <c>Min + (int)(GetFraction() * (Max - Min + 1))</c> —— 除数是 `Max-Min+1`，
+    ///    也就是**两端都取得到**。
     /// </summary>
     private object? DoRandomIntFromRange(EffectContext c, object?[] a)
-        => c.State.Random.Next(IntArg(a, 0), IntArg(a, 1));
+    {
+        int lo = IntArg(a, 0);
+        int hi = IntArg(a, 1);
+        int v = c.State.Random.RandRange(lo, hi);
+        c.State.TraceRandom($"RandomIntFromRangeWithStream({lo},{hi}) -> {v}");
+        return v;
+    }
 
     /// <summary>派发一次调用。<paramref name="handled"/> 为 false 表示内核还没实现这个名字。</summary>
     public object? InvokeByName(string name, object? receiver, object?[] args, EffectContext ctx, out bool handled)    {
@@ -1608,6 +2326,41 @@ public sealed partial class CardApi
         //   ⚠️ 加门时**必须**用修好之后的 `CardApi.CanCardBeBuffed`：用旧实现会立刻打死
         //   334 张 `ChangeAttack` + 311 张 `ChangeDefense` 的攻防改动。
         int delta = IntArg(a, 2);
+        int changeType = IntArg(a, 3);
+
+        // ★★ `changeType == 2`（`EChangeType::SetValue`）= **设成绝对值**，不是"加 delta"。
+        //
+        // 判据是蓝图本体（`ref/kards-sim/.../BP_CardFunctions.g.cs` 的 `ChangeAttack`，
+        // 函数起始 `:6491`）：
+        // <code>
+        //   si  localChangeType 分支：0→L_06BA  1→L_04C8  2/3/5/default→L_0357  4→L_096F
+        //   L_0357  getAndDecryptAttack(card) → decryptedAttack
+        //           if (decryptedAttack == localInputAmount) { valueChanged = False; 结束 }
+        //           maxAttack = Clamp(localInputAmount, 0, 99)
+        //           setAndEncryptAttack(card, Clamp(localInputAmount, 0, 99), …)
+        //   L_04C8（ct==1 permBuff）  newVal = Clamp(decryptedAttack + localInputAmount, 0, 99)
+        // </code>
+        // 即：**2 = 总量赋成 amount**、**1 = 加 amount**。
+        // 枚举值逐字来自 `E:\peoject\kards\Source\kards\Public\EChangeType.h`
+        // （`tempBuffGive=0, permBuff=1, SetValue=2, Suppress=3, tempBuffRemove=4, …`）。
+        //
+        // 为什么必须修（对局 389594 任务 A 的另一半）：`card_unit_meteor` 的
+        // `OnAfterAttack` 生成的副本要「攻/防 = 原值 ×2」，
+        // 而它是用 `ChangeAttack(新卡, cardID, attTotal*2, changeType=2, …)` 表达的
+        // （`card_unit_meteor` IR i=202 / i=432）。副本是刚 `CreateCard` 出来的 1/1，
+        // 按"加"算是 1+2=**3**、按"设"算是 **2** —— 客户端是 2。
+        // 全卡池 7 个 `ChangeAttack` + 11 个 `ChangeDefense` 走 changeType=2。
+        //
+        // ⚠️ `!invert`：`invert` 是本内核给 `LoseAttack` 用的取负开关，
+        //    「取负」和「设成绝对值」放一起没有意义（蓝图里 `LoseAttack` 是另一个函数）。
+        //    实测 IR 里 `GainAttack` / `LoseAttack` 作为 `fn` **一个调用点都没有**，
+        //    所以这只是防御性写法。
+        if (!invert && changeType == ChangeTypeSetValueReal)
+        {
+            ChangeAttack(target, Math.Clamp(delta, 0, 99) - target.Attack, c.Self);
+            return null;
+        }
+
         ChangeAttack(target, invert ? -delta : delta, c.Self);
         return null;
     }
@@ -1622,7 +2375,21 @@ public sealed partial class CardApi
 
         // 同 `DoChangeAttack`：`ChangeDefense` si=48/80 是同一个守位，
         // 同理**不落地** —— 门在本内核恒真，加了是空转（理由见 `DoChangeAttack` 那段）。
-        ChangeDefense(target, IntArg(a, 2), c.Self);
+        //
+        // ★ `changeType == 2`（SetValue）同样是**设成绝对值**，出处同 `DoChangeAttack`：
+        //   `ChangeDefense` 的 L_03D8 分支 `setAndEncryptDefense(card, Clamp(amount,0,99))`
+        //   + `maxDefense = Clamp(amount,0,99)`。这里走已有的 `SetDefenseValue`
+        //   （它额外发 `OnAfterDefenseIsSet`，正是 SetValue 分支的专属事件）。
+        //   实测调用点：`card_unit_no_9_commando` i=53（防设成 1）、
+        //   `card_unit_meteor` i=432（防设成 defTotal×2）。
+        int value = IntArg(a, 2);
+        if (IntArg(a, 3) == ChangeTypeSetValueReal)
+        {
+            SetDefenseValue(target, Math.Clamp(value, 0, 99), c.Self);
+            return null;
+        }
+
+        ChangeDefense(target, value, c.Self);
         return null;
     }
 
@@ -1723,10 +2490,17 @@ public sealed partial class CardApi
     /// </summary>
     private const int ChangeTypeSetValueReal = 2;
 
-    /// <summary>撤销某个来源在目标卡上的**费用** buff（其余 buff 保留）。</summary>
+    /// <summary>
+    /// 撤销某个来源在目标卡上的**费用** buff（其余 buff 保留）。
+    ///
+    /// ⚠️ 只动**永久**那个槽位：调用方是光环的 `RemoveTheBuff`（离场还原 / 回合结束重挂），
+    /// 它们施加的本来就是永久修正（`ChangeKreditCost` 的 changeType 0/1，不是 4）。
+    /// 临时改费是另一条路径（`changeType=4`，见 `DoChangeKreditCost`）。
+    /// </summary>
     private void RemoveCostBuff(CardInstance target, int sourceId)
     {
-        if (!target.BuffsBySource.TryGetValue(sourceId, out var buff))
+        var key = (sourceId, false);
+        if (!target.BuffsBySource.TryGetValue(key, out var buff))
         {
             return;
         }
@@ -1735,16 +2509,16 @@ public sealed partial class CardApi
         buff.KreditCostSetsAbsoluteValue = false;
         if (buff.IsEmpty)
         {
-            target.BuffsBySource.Remove(sourceId);
+            target.BuffsBySource.Remove(key);
         }
 
         target.RecalculateStats();
     }
 
-    /// <summary>撤销某个来源在目标卡上的**全部** buff（`RemoveTheBuff` 的通用形态）。</summary>
+    /// <summary>撤销某个来源在目标卡上的**全部永久** buff（`RemoveTheBuff` 的通用形态）。</summary>
     private void RemoveBuffFromSource(CardInstance target, int sourceId)
     {
-        if (target.BuffsBySource.Remove(sourceId))
+        if (target.BuffsBySource.Remove((sourceId, false)))
         {
             target.RecalculateStats();
         }
@@ -1782,12 +2556,12 @@ public sealed partial class CardApi
 
         if (changeType == ChangeTypeTempBuffRemove)
         {
-            if (target.BuffsBySource.TryGetValue(sourceId, out var existing))
+            if (target.BuffsBySource.TryGetValue((sourceId, false), out var existing))
             {
                 existing.OperationCost = 0;
                 if (existing.IsEmpty)
                 {
-                    target.BuffsBySource.Remove(sourceId);
+                    target.BuffsBySource.Remove((sourceId, false));
                 }
 
                 target.RecalculateStats();
@@ -1832,12 +2606,12 @@ public sealed partial class CardApi
 
         if (changeType == ChangeTypeTempBuffRemove)
         {
-            if (target.BuffsBySource.TryGetValue(sourceId, out var existing))
+            if (target.BuffsBySource.TryGetValue((sourceId, false), out var existing))
             {
                 existing.HeavyArmor = 0;
                 if (existing.IsEmpty)
                 {
-                    target.BuffsBySource.Remove(sourceId);
+                    target.BuffsBySource.Remove((sourceId, false));
                 }
 
                 target.RecalculateStats();
@@ -1898,6 +2672,246 @@ public sealed partial class CardApi
             HealCard(target, IntArg(a, 1));
         }
 
+        return null;
+    }
+
+    /// <summary>
+    /// `BP_CardFunctions.DamageMultipleCards`（7 条语句）——
+    /// 「对一批卡同时造成等量伤害」的包装。
+    ///
+    /// 蓝图逐字：
+    /// <code>
+    /// si=0  Array_Length(cardsToDamage)          ; 空数组直接返回
+    /// si=1  Greater_IntInt(len, 0)               ; si=2 JumpIfNot → 184 return
+    /// si=3  ApplyDamageToMultipleCards(receiverIDs, damagerCardID, damage,
+    ///                                  out damageReceivedArr, out destroyedArr,
+    ///                                  out locationArr, out OldDefenseArr)
+    /// si=4  cardsDestroyed = ApplyDamageToMultipleCards_outputDestroyedCards
+    /// </code>
+    ///
+    /// 实参形状（6 个独立调用点互证：`anzac_spirit` / `firestorm_skirm` /
+    /// `shelling` / `blockade` / `carpet_bombing` / `ApplyDamageToMultipleCards` 自身）：
+    /// <code>
+    /// [0] cardsToDamage   ← **卡对象数组**（不是 ID 数组！）
+    /// [1] damage          （多数是字面量，少数是 this.damageToDeal）
+    /// [2] attackerID / instigatorID
+    /// [3] out cardsDestroyed
+    /// </code>
+    ///
+    /// ⚠️ 关键：`[0]` 是**对象数组**，而 `receiverIDs` 这个名字是在
+    /// `ApplyDamageToMultipleCards` **内部**（它才是收 ID 数组的那个）。
+    /// 外层按名字去读 ID 数组会一张卡都打不到 —— 这正是它一直没被实现时
+    /// 最容易被写错的地方。这里按调用点形状读对象数组。
+    ///
+    /// 伤害走 <see cref="CardApi.DealDamage"/> 这唯一漏斗，所以修正链
+    /// （`OnCardDealDamage_ModifyDamageDealt` / `OnOtherCardDealDamageAddDamage`）
+    /// 和 `ZActionDamageMultipleCards` 都自然带上，不需要在这里重做一遍。
+    /// </summary>
+    private object? DoDamageMultipleCards(EffectContext c, object? r, object?[] a)
+    {
+        var targets = EvalArray(r, a)
+            .Select(AsCard)
+            .Where(x => x is not null && x.IsAlive)
+            .Select(x => x!)
+            .ToList();
+
+        if (targets.Count == 0)
+        {
+            return null;
+        }
+
+        int amount = IntArg(a, 1);
+        var source = AsCard(a.ElementAtOrDefault(2)) ?? c.Self;
+
+        var destroyed = new List<int>();
+        // 先物化一份快照：DealDamage 会就地 Destroy（改 Location），
+        // 在 foreach 里读正在被改的集合是错的。
+        foreach (var target in targets)
+        {
+            DealDamage(target, amount, source);
+        }
+
+        // 收尾统一数一次「谁死了」。蓝图是在 ApplyDamageToMultipleCards 内部逐个记的，
+        // 效果一样（`destroyed` 出参只被读、不影响结算）。
+        foreach (var target in targets)
+        {
+            if (!target.IsAlive)
+            {
+                destroyed.Add(target.CardId);
+            }
+        }
+
+        if (destroyed.Count > 0)
+        {
+            _engine.FireSubAction("ZActionDamageMultipleCards", new[]
+            {
+                ActionValue2.Int("attackerID", source?.CardId ?? 0),
+                ActionValue2.Int("damage", amount),
+            });
+        }
+
+        return destroyed;
+    }
+
+    /// <summary>
+    /// `BP_CardFunctions.MakeCardsFight`（**互斗**）—— 让两个单位互相打一次。
+    ///
+    /// ## 1. 签名：**4 个实参**，不是 6 个
+    ///
+    /// ⚠️ 任务书里那句「`CardApi.cs:850` 的签名形状 `(a, b, dmg, False, True, False)` ——
+    /// **6 个参数**」说的是 `MakeCardsFight` **内部**那两次
+    /// `ExecuteOnDealDamageAddDamage` 调用（6 个入参 + 1 个出参），**不是**
+    /// `MakeCardsFight` 自己的签名。证据：
+    /// <list type="bullet">
+    /// <item><c>ref/kards-sim/KardsSim/Generated/_index.g.cs:3994</c> ——
+    /// <c>["MakeCardsFight"] = new[] { "unitThisSide", "unitOppositeSide", "instigatorID", "qqq" }</c>
+    /// （参数名来自资产 `FunctionExport.LoadedProperties` 的 `CPF_Parm` 声明序）；</item>
+    /// <item><c>BP_CardFunctions.g.cs:25913-25916</c> ——
+    /// <c>args[0]=unitThisSide, args[1]=unitOppositeSide, args[2]=instigatorID, args[3]=out qqq</c>；</item>
+    /// <item>IR 里 12/12 个调用点都是 4 个实参（`args[3]` 是 out 槽
+    /// <c>CallFunc_MakeCardsFight_qqq</c>，且出参**从不被读**）。</item>
+    /// </list>
+    /// 六个参数的形状是蓝图内部（`g.cs:25977` / `26006`）：
+    /// <c>ExecuteOnDealDamageAddDamage(_damageDealerCard, _damageRecieverCard, damage,
+    /// _fromAttack, fromFight, _isDefenderDamage)</c>
+    /// —— `dmg` 是"这一方向、修正前的伤害"，后三个 bool 是
+    /// `_fromAttack=False` / `fromFight=True` / `_isDefenderDamage=False`。
+    ///
+    /// ## 2. 和 `Attack`（定向攻击）的区别
+    ///
+    /// | | `MatchEngine.Attack`（`ExecuteAttackCard`） | `MakeCardsFight` |
+    /// |---|---|---|
+    /// | 攻防对称性 | 攻击方 → 防御方，防御方**反击** | **双向**，两边各用自己的 `getTotalAttack` |
+    /// | 伤害算的时机 | 打一下、算一下 | **两个方向都算完**，再依次落地（`si=12F/1E8` 在 `si=26E/299` 之前） |
+    /// | `fromAttack` | `True`（战斗伤害） | **`False`** —— 互斗是**效果伤害**，不是战斗伤害 |
+    /// | `isDefenderDamage` | 反击那笔是 `True` | **两个方向都是 `False`** |
+    /// | 反击门 | 防御方**死了就不反击**（`MatchEngine.cs:1570` 的 `defender.IsAlive`） | **没有这道门** ⇒ 3/3 打 3/3 **双方都死** |
+    /// | 行动资源 | 扣油费、`HasAttackedThisTurn`、`AttacksThisTurn++`、`OnBeforeAttack`、`OnAfterAttack` | **一样都不碰**（谁都不是"攻击方"） |
+    /// | 烟幕 | 攻击后自己消失 | **不消失** |
+    /// | 召唤失调 / 压制 / 守护 / 射程 | 全都要过 `CanAttack` 那一族门 | **一道门都不过** |
+    ///
+    /// ## 3. 门：只有 `IsValid` + `IsLocatedOnBoard`
+    ///
+    /// `cardsCheckFunctions` 里**没有**对应的门。那份规则库只有 `CanAttack` /
+    /// `CanSelectAsTarget`（`ref/kards-sim/KardsSim/Generated/_deps/cardsCheckFunctions.g.cs`），
+    /// 而 `MakeCardsFight` **两个都不调**。它自己只有两道：
+    /// <list type="number">
+    /// <item>`si=1C/43` `IsValid(unitThisSide)` / `IsValid(unitOppositeSide)` —— 任一无效直接返回；</item>
+    /// <item>`si=FC/1B5` `IsLocatedOnBoard(...)` —— **只决定"那一方向的伤害算不算"**，
+    /// 不算就保持 `si=5` 的初值 0；两个 `ApplyDamageToCard`（`si=26E/299`）
+    /// **在控制流上无条件执行**（两条 PopExecutionFlow 分支都汇到 `L_026E`）。</item>
+    /// </list>
+    /// ⇒ **召唤失调的单位照样能被强制互斗**，被压制的、有烟幕的、够不着的、有守护保护的
+    /// 也全都照样。这和"能不能主动攻击"是两码事。
+    ///
+    /// ## 4. 互斗双方**可以是同一方**——蓝图对此**没有任何处理**
+    ///
+    /// 参数名虽然叫 `unitThisSide` / `unitOppositeSide`，但函数体里**一次阵营判定都没有**
+    /// （`g.cs:25918-26034` 全文没有 `side` / `IsSameSide` / `GetPlayingSide` 之类的调用）。
+    /// 传两个友方单位进去，它们就真的互相打。内核**照抄这个行为，不自己加门**。
+    /// 实测 12 个调用点里 `card_unit_57th_rifles`（`i=624`）的 `enemyUnit` 也是
+    /// 蓝图自己选出来的，不是 `MakeCardsFight` 校验的。
+    ///
+    /// ## 5. 已知偏差（如实记，不修）
+    ///
+    /// <list type="bullet">
+    /// <item>`isFightDefenderDamage`（第 5 个实参：`si=26E` 传 `False`、`si=299` 传 `True`）
+    /// 在蓝图里**只流向 `NotifyDamageCard`**（`g.cs:1104`），是纯客户端表现标记，
+    /// 不进任何规则判定 —— 内核的 `ZActionDamageCard` 没有这个字段，故不建模。</item>
+    /// <item>内核的 <see cref="CardApi.IsLocatedOnBoard"/> 是
+    /// `Location.IsBoard() &amp;&amp; !IsHq`（**排除 HQ**），而反编译参考里原生
+    /// `IsLocatedOnBoard` 是 `Loc is Loc.Board or Loc.Frontline`（**含 HQ**，
+    /// `ref/kards-sim/KardsSim/Bridge/EngineHost.cs:995-999`）。
+    /// 这里**复用内核那一个**（与 `IsLocatedOnBoard` 派发键同源，不另立第二套判据）；
+    /// 12 个调用点传的都是"单位"（`unitThisSide` / `unitOppositeSide`），HQ 不在其中，
+    /// 所以实际无差。若以后真出现"互斗 HQ"，要改的是内核那一个判据，不是这里。</item>
+    /// <item>`ExecuteOnDealDamageAddDamageAfterCalc` 内核没有单独一层
+    /// （它只改 `finalDamage`，见 `g.cs:15949`），所以这里与 `DealDamage` 一致地省略。
+    /// ⚠️ 免疫那一半不会因此漏：蓝图在那层里做 `getHasImmune(toCard) ⇒ finalDamage = 0`
+    /// （`g.cs:15979-15985`），内核等价地做在 `MatchEngine.ApplyDamage`
+    /// （`MatchEngine.cs:1801-1804`），净效果相同。</item>
+    /// <item>**"先算完两笔、再落地"只做到了伤害值那一半。**
+    /// 蓝图 `ApplyDamageToCard` **自己不摧毁**（只 `_isDestroyed = getTotalDefense() &lt;= 0`
+    /// 再 `NotifyDamageCard`，`g.cs:1076-1104`），收尸在外面统一做 ⇒
+    /// 方向 1 打死人**不会**插在方向 2 的扣血之前。
+    /// 内核的 `DealDamage` 尾段是**立即** `Destroy(target)`（`CardApi.cs:1046-1049`），
+    /// 所以这里方向 1 的死亡触发会先于方向 2 的扣血。
+    /// **不为此另开旁路**：那是 `DealDamage` 这个唯一漏斗的既有形状，
+    /// `DamageCard` / `DamageMultipleCards` 全都一样；要改就该在漏斗里改。
+    /// 实际影响面很窄 —— 两笔伤害的**数值**已经先算好了（`si=6A/AE`），
+    /// 只有"方向 1 的死亡触发去改方向 2 的**防御**（治疗/加护甲/给免疫）"才看得出差别。</item>
+    /// </list>
+    /// </summary>
+    private object? DoMakeCardsFight(EffectContext c, object?[] a)
+    {
+        // 出参 `qqq` 全卡池从不被读（12/12 调用点的 `CallFunc_MakeCardsFight_qqq` 只写不读），
+        // 蓝图里它连赋值都没有（`g.cs:25917` 初值 Nothing，`26038` 原样回传）⇒ 返回 null。
+        var thisSide = AsCardOrId(c, a.ElementAtOrDefault(0));
+        var opposite = AsCardOrId(c, a.ElementAtOrDefault(1));
+
+        // si=1C / si=43：两道 IsValid 门。任一无效 ⇒ 整段不发生（连攻击值都不读）。
+        if (thisSide is null || opposite is null)
+        {
+            return null;
+        }
+
+        // si=6A / si=AE：两个方向的攻击值都在**任何伤害落地之前**取。
+        // 用 `Attack`（= 蓝图 `getTotalAttack`，含 buff）而不是 `Definition.Attack`。
+        int damageToOpposite = thisSide.Attack;
+        int damageToThis = opposite.Attack;
+
+        // si=12F / si=1E8：两个方向的修正链也都在**落地之前**跑完（这就是相位拆分的理由，
+        // 见 `CardApi.ApplyCalculatedDamage` 的注释）。
+        // 入参逐字对齐 `g.cs:25977` / `26006`：
+        //   ExecuteOnDealDamageAddDamage(dealer, receiver, damage, _fromAttack=False,
+        //                                fromFight=True, _isDefenderDamage=False)
+        // ⚠️ `fromFight=True` 是**互斗伤害的身份标记**，不是战斗伤害 —— `isCombatDamage` 保持 False。
+        int finalToOpposite = IsLocatedOnBoard(opposite)
+            ? ExecuteOnDealDamageAddDamage(thisSide, opposite, damageToOpposite,
+                                           fromAttack: false, fromFight: true, isDefenderDamage: false)
+            : 0;
+
+        int finalToThis = IsLocatedOnBoard(thisSide)
+            ? ExecuteOnDealDamageAddDamage(opposite, thisSide, damageToThis,
+                                           fromAttack: false, fromFight: true, isDefenderDamage: false)
+            : 0;
+
+        // si=26E / si=299：两笔伤害**依次**落地，数值都已算好。
+        // 蓝图 `ApplyDamageToCard`（`g.cs:893-896`，标签 `L_0108`）：
+        // `if (!(finalDamage > 0)) goto L_0181` ⇒ 0 伤害整段跳过，
+        // 这里照抄那道门（也因此不会发出多余的 `ZActionDamageCard`）。
+        if (finalToOpposite > 0)
+        {
+            ApplyCalculatedDamage(opposite, finalToOpposite, thisSide,
+                                  isCombatDamage: false, counterDamage: false, isRedirected: false);
+        }
+
+        if (finalToThis > 0)
+        {
+            ApplyCalculatedDamage(thisSide, finalToThis, opposite,
+                                  isCombatDamage: false, counterDamage: false, isRedirected: false);
+        }
+
+        // ⚠️ **不在这里判"谁死了"**：`Defense <= 0` 只是"待销毁"，
+        // 真死在 `CheckDeaths()` 里（由动作层收尾调用）。蓝图同理 ——
+        // `MakeCardsFight` 自己不做任何摧毁，两个方向都打完之后才由外层收尸。
+        return null;
+    }
+
+    /// <summary>
+    /// `BP_CardFunctions.AddAttackUntilEndOfTurn` —— 「+N 攻击，直到回合结束」。
+    /// 语义与出处见 <see cref="CardApi.AddAttackUntilEndOfTurn"/>。
+    ///
+    /// ⚠️ 这里**不用** `TargetCard`：那个辅助函数是给「接收者=施法者、
+    /// 目标在 `Parameters[0]`」这一类原语用的（见它自己的注释）。
+    /// 而本函数的调用点形状是 `(卡, this.cardID, IntConst:N)` —— 三个参数**都是实参**，
+    /// `[0]` 就是目标卡。用 `TargetCard` 会去读接收者，在这条链上是错的。
+    /// </summary>
+    private object? DoAddAttackUntilEndOfTurn(EffectContext c, object?[] a)
+    {
+        var target = AsCard(a.ElementAtOrDefault(0));
+        var source = AsCard(a.ElementAtOrDefault(1)) ?? c.Self;
+        AddAttackUntilEndOfTurn(target, source, IntArg(a, 2));
         return null;
     }
 
@@ -1980,6 +2994,307 @@ public sealed partial class CardApi
         }
 
         return card;
+    }
+
+    // ==================== 2026-10-02：补缺口的辅助实现 ====================
+
+    /// <summary>
+    /// `DiscardCardFromHand(card_or_cardID, discarderID, skipTriggers, skipVisuals, out success)`
+    /// —— 派发表里的 (B) 一行注册，落到已有的 <see cref="CardApi.DiscardCard"/>。
+    ///
+    /// 出处：<c>CardApi.cs:1653</c> 的文档注释
+    /// 「对应 `BP_CardFunctions::DiscardCardFromHand` / `DiscardCard`」。
+    ///
+    /// ⚠️ 参数形状**不唯一**（IR 实测 39 个调用点 / 14 种形状，
+    /// <c>out/audit/ir-callsites.py DiscardCardFromHand</c>）：
+    ///   <list type="bullet">
+    ///   <item><c>a[0]</c> 有时是**卡对象**（`{var:cardToDiscard}` / `{var:CallFunc_Array_Get_Item}`），
+    ///         有时是**整数 cardID**（`{var:cardID, ctx:{var:...}}`，9+3 个调用点）——
+    ///         所以必须走 <see cref="AsCardOrId"/>，只认一种形状会静默丢掉一半调用点
+    ///         （同 <see cref="AsCardOrId"/> 注释里那 94 张卡的前科）。</item>
+    ///   <item><c>a[1]</c> = `discarderID`（"谁弃的"）。</item>
+    ///   <item><c>a[2]</c>/<c>a[3]</c> = `skipTriggers`/`skipVisuals`（全卡池都是 false）。
+    ///         `skipTriggers` 本内核**不支持**（见「没修的」清单）—— 传 true 的调用点会多广播一次
+    ///         `OnOtherCardDiscarded`，不会少做事。</item>
+    ///   </list>
+    /// 返回值写进 <c>a[4]</c> 的 out 槽：弃成功 true / 卡无效 false
+    /// （蓝图里 `success` 只在卡无效或 `OnAttemptedDiscard` 取消时为 false）。
+    /// </summary>
+    private object? DoDiscardCardFromHand(EffectContext c, object? r, object?[] a)
+    {
+        var card = AsCard(a.ElementAtOrDefault(0)) ?? AsCardOrId(c, a.ElementAtOrDefault(0));
+        if (card is null)
+        {
+            return false;
+        }
+
+        DiscardCard(card, AsCardOrId(c, a.ElementAtOrDefault(1)));
+        return true;
+    }
+
+    /// <summary>
+    /// `DiscardCardFromDeck(cardID, discarderID, skipTriggers, skipVisuals, out success)`。
+    ///
+    /// 出处：直译产物 <c>out/Generated-gap/_deps/BP_CardFunctions.g.cs</c> 的同名函数体：
+    /// <code>
+    /// L_0005  cardID > 0 ?
+    /// L_0031  GetCardFromID(cardID) → tmpCardToDiscard ; IsValid ?
+    /// L_008B  tmpCard.location == 2 || == 1 ?        ; 只在牌库里才弃
+    /// L_01C8  OnAttemptedDiscard(…, out cancelDiscard) ; cancel ⇒ success=false 且不弃
+    /// L_0228  RemoveCardFromDeckBySide(side, cardID) + ExecuteOnAfterDeckChanged(side)
+    /// L_02AB  SetCardLocationAndLocNumber(cardID, 8 /*Discard*/, 0)
+    /// L_02EE  NotifyDiscardCard(cardID, discarderID, oldLocation, …) ; success = true
+    /// </code>
+    ///
+    /// 本内核的 <see cref="CardApi.DiscardCard"/> 做的正是「移到 Discard + 广播
+    /// `OnOtherCardDiscarded`」，所以直接复用。
+    /// **不实现** <c>OnAttemptedDiscard</c> 的取消门（本内核没有这个事件）——
+    /// 少一次取消机会，**不会多弃牌**。
+    /// </summary>
+    private object? DoDiscardCardFromDeck(EffectContext c, object? r, object?[] a)
+    {
+        var card = AsCardOrId(c, a.ElementAtOrDefault(0));
+        if (card is null || !IsLocatedInDeck(card))
+        {
+            return false;
+        }
+
+        DiscardCard(card, AsCardOrId(c, a.ElementAtOrDefault(1)));
+        return true;
+    }
+
+    /// <summary>
+    /// ★ `SpawnCardInFrontline(card_name, side, spawnerID, out campaignName, giveBlitz,
+    ///   out spawnedCardID, salvageFaction, locationNumber, makeVeteran)`
+    /// —— 108 调用点 / 29 张卡。
+    ///
+    /// 出处（**不是猜的**）：直译产物 <c>out/Generated-gap/_deps/BP_CardFunctions.g.cs:35201</c>
+    /// 的同名函数体，全部逻辑只有一步：
+    /// <code>
+    /// SpawnCardToBoard(card_name, side, 7 /*BoardFrontline*/, locationNumber, 0,
+    ///                  gold, giveBlitz, spawnerID, 0, makeVeteran, out spawnedCardID)
+    /// </code>
+    /// 其中 <c>gold</c> 的来历：`campaignName` 为空且 `spawnerID > 0` 时取
+    /// <c>GetCardFromID(spawnerID).isGoldCard</c>。
+    ///
+    /// 参数下标逐个与 IR 的 108 个调用点吻合
+    /// （<c>out/audit/ir-callsites.py SpawnCardInFrontline</c>；例 `card_event_airdrop` i=219
+    ///  <c>[name, side, cardID, Temp_text_Variable_1, false, out, 0, -1, false]</c>）。
+    ///
+    /// 落点 `7` = <see cref="CardLocation.BoardFrontline"/>，**不是** `SpawnCardOnBattlefield`
+    /// 那种按 `a[1]` 判半场/前线 —— 这正是它和那条"同族但已验证"的实现的关键差别。
+    /// 本内核的 <see cref="CardApi.SpawnOnBattlefield"/> 已经处理了
+    /// 「追加到队尾 / 指定槽位 / Blitz / 山地加成 / `ZActionSpawnCard`」，所以复用它。
+    /// </summary>
+    private object? DoSpawnInFrontline(EffectContext c, object? r, object?[] a)
+    {
+        string? cardName = FindCardNameArg(c, a);
+        if (cardName is null)
+        {
+            return null;
+        }
+
+        // side 在 a[1]（a[0] 是卡名）。`SideArg` 的兜底是 c.Controller ——
+        // 蓝图里这一位几乎总是显式 `side` 变量或 1/2 常量。
+        var side = SideArg(r, a, 1, c.Controller);
+
+        // `gold`：spawner 是金卡时生成的也是金卡（函数体 L_007B）。
+        bool gold = AsCardOrId(c, a.ElementAtOrDefault(2))?.IsGold ?? false;
+
+        var card = SpawnOnBattlefield(side, cardName,
+            frontline: true,
+            locationNumber: IntArg(a, 7, -1),
+            newGiveBlitz: TruthyArg(a, 4),
+            forceGoldCard: gold);
+
+        // `makeVeteran`（a[8]）：函数体把它当 `SpawnCardToBoard` 的实参传下去；
+        // 本内核 `SpawnOnBattlefield` 没有这个参数，等价地在生成之后调 `MakeVeteran`
+        // （与 `DoSpawnOnBattlefield` 对 `SpawnCardOnBattlefield` 的处理同构）。
+        if (TruthyArg(a, 8))
+        {
+            MakeVeteran(card);
+        }
+
+        return card;
+    }
+
+    /// <summary>
+    /// `GetCardsInSupportLineBySide(side, unitsOnly, includeCovertCards, out cards)`
+    /// —— 41 调用点 / 34 张卡。
+    ///
+    /// 出处：直译产物 <c>_deps/BP_CardFunctions.g.cs</c> 同名函数体的完整循环，
+    /// 四个条件依次是：
+    /// <code>
+    /// ① card.side == side
+    /// ② card.location == GetSupportLineBySide(side)
+    /// ③ !IsUnrevealedCovertCard(card) || includeCovertCards
+    /// ④ unitsOnly ⇒ IsUnit(card)
+    /// </code>
+    /// 本内核的映射：
+    /// <list type="bullet">
+    /// <item>② 半场就是 <see cref="SideExtensions.HqOf"/>（`BoardHqLeft/Right`，
+    ///       见 <c>Engine/Enums.cs</c> 的注释：`GetSupportLineLocationBySide(side)` = 5/6）。</item>
+    /// <item>③ <see cref="CardApi.IsUnrevealedCovertCard"/> 在本内核是**恒 false 的桩**
+    ///       （没建模「已揭示/未揭示」位）⇒ 条件恒真。**这不是遗漏**，
+    ///       是有意的一致：同一个桩在别处（`CanCardBeBuffed` 的门）也这么用。</item>
+    /// <item>④ 按参数过滤。**HQ 不排除**：蓝图里 `GetAllCardInBattle` 含 HQ、
+    ///       过滤只按 location；`unitsOnly=false` 的调用点会拿到 HQ（与蓝图同）。
+    ///       实测 41 个调用点里 `unitsOnly` 全是 true 或变量。</item>
+    /// </list>
+    /// </summary>
+    private object? DoGetCardsInSupportLine(EffectContext c, object? r, object?[] a)
+    {
+        var side = SideArg(r, a, 0, c.Controller);
+        bool unitsOnly = TruthyArg(a, 1);
+
+        var cards = c.State.Cards(side, side.HqOf());
+        if (unitsOnly)
+        {
+            cards = cards.FindAll(x => IsUnit(x));
+        }
+
+        return cards;
+    }
+
+    /// <summary>
+    /// `IsLocationFull(location, out isFull)` —— 20 调用点 / 17 张卡。
+    ///
+    /// 出处：直译产物 <c>_deps/BP_CardFunctions.g.cs</c> 同名函数体的**全部**内容
+    /// 就是一次 `FetchCardsByLocation(location, out QtyInLocation, out isLocationFull, …)`
+    /// 然后把 `isLocationFull` 转出去。
+    ///
+    /// 容量（`FetchCardsByLocation` 的体 + <see cref="GameState"/> 的常量）：
+    /// <list type="bullet">
+    /// <item><c>7</c> 前线 → <see cref="GameState.FrontlineCapacity"/>
+    ///       （默认 <see cref="GameState.DefaultFrontlineCapacity"/>=5，有 limiter 时 2）。</item>
+    /// <item><c>5</c>/<c>6</c> 半场 → <see cref="GameState.HalfBoardCapacity"/>=5，
+    ///       **计数含 HQ**（`MatchEngine.HalfBoardFull` 的注释已定案）。</item>
+    /// <item><c>3</c>/<c>4</c> 手牌 → <see cref="GameState.HandCapacity"/>=9。</item>
+    /// <item>牌库 <c>1</c>/<c>2</c>、弃牌堆 <c>8</c> → **永不"满"**（蓝图里没有上限）。</item>
+    /// </list>
+    /// </summary>
+    private object? DoIsLocationFull(EffectContext c, object? r, object?[] a)
+    {
+        var loc = (CardLocation)IntArg(a, 0);
+        int count = c.State.CardsUnordered().Count(x => x.Location == loc);
+        return loc switch
+        {
+            CardLocation.BoardFrontline => count >= c.State.FrontlineCapacity,
+            CardLocation.BoardHqLeft or CardLocation.BoardHqRight => count >= GameState.HalfBoardCapacity,
+            CardLocation.HandLeft or CardLocation.HandRight => count >= GameState.HandCapacity,
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// `DestroyMultipleCards(cardsToDestroy, destroyerCardID, out)` —— 20 调用点 / 19 张卡。
+    ///
+    /// 出处：直译产物 <c>_deps/BP_CardFunctions.g.cs</c> 同名函数体：
+    /// 数组长度 &gt; 0 时调 <c>ApplyDestroyMultipleCards(self, destroyerCardID, out cardsToDestroy)</c>。
+    /// `ApplyDestroyMultipleCards` 本身也是缺失键，但它的语义就是「逐张 Destroy」
+    /// （参考实现 `EngineHost.cs` 里同名的也是这个形状），所以这里直接逐张走
+    /// <see cref="CardApi.DestroyCard"/> —— 少一层名字依赖，行为一致。
+    ///
+    /// ⚠️ 数组元素**两种形状都有**（卡对象 / 整数 cardID），用 <see cref="AsCardOrId"/>
+    /// 统一（同 `DiscardCardFromHand` 的理由）。
+    /// </summary>
+    private object? DoDestroyMultipleCards(EffectContext c, object? r, object?[] a)
+    {
+        var list = EvalList(r, a);
+        var destroyer = AsCardOrId(c, a.ElementAtOrDefault(1)) ?? c.Self;
+        int n = 0;
+        foreach (object? v in list)
+        {
+            var card = AsCard(v) ?? AsCardOrId(c, v);
+            if (card is not null)
+            {
+                DestroyCard(card, destroyer);
+                n++;
+            }
+        }
+
+        return n;
+    }
+
+    // ---- 自定义名后缀（`CustomName1*` / `CustomName2*`）--------------------
+    //
+    // 语义出处：参考实现 `ref/kards-sim/KardsSim/Bridge/EngineHost.cs:2160-2182`
+    // （`SuffixAdd` / `SuffixRemove`）与 `:1088/:1307/:1498-1500/:1639`（各条原语）。
+    // 存储：`CardInstance.CustomJson`（和客户端的卡私有 JSON 同一层），
+    // 值是用逗号分隔的标记串。**幂等**（重复 Add 同一个标记不重复追加）——
+    // 参考实现就是这么写的，而且客户端里 `CustomName1Add` 会被反复触发。
+    //
+    // 为什么值得补：`CardApi.cs:631` 早就记了一条「没做 `StopDestructionEffect` 那一半：
+    // 它是 `CustomName1` 属性（si=3539 `CustomName1Add("StopDestructionEffect")`），
+    // 而 `CustomName1*` 三件套内核里没有」。这一段就是来关掉那条 TODO 的。
+
+    /// <summary>`CustomName{1,2}Add(标记)`：往这张卡的后缀串里加一个标记（幂等）。</summary>
+    private void SuffixAdd(EffectContext c, object? r, object?[] a, string key)
+    {
+        var card = AsCardOrId(c, a.ElementAtOrDefault(0)) ?? SelfArg(c, r, a);
+        string tag = StrArg(a, 0);
+        if (card is null || tag.Length == 0)
+        {
+            return;
+        }
+
+        var parts = JsonGetString(card, key)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
+        if (parts.Contains(tag, StringComparer.Ordinal))
+        {
+            return;
+        }
+
+        parts.Add(tag);
+        JsonSetString(card, key, string.Join(",", parts));
+    }
+
+    /// <summary>`CustomName{1,2}Remove(标记)`：从后缀串里删掉一个标记。</summary>
+    private void SuffixRemove(EffectContext c, object? r, object?[] a, string key)
+    {
+        var card = AsCardOrId(c, a.ElementAtOrDefault(0)) ?? SelfArg(c, r, a);
+        string tag = StrArg(a, 0);
+        if (card is null || tag.Length == 0)
+        {
+            return;
+        }
+
+        var kept = JsonGetString(card, key)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Where(x => !string.Equals(x, tag, StringComparison.Ordinal));
+        JsonSetString(card, key, string.Join(",", kept));
+    }
+
+    /// <summary>
+    /// `CustomName{1,2}HasAttribute(标记, out doesIt)` —— 后缀串里有没有这个标记。
+    /// 形状：`recv` = 被查的卡（8 个 `CustomName1` 调用点里有 2 个 recv 是 null ⇒
+    /// 走 <see cref="SelfArg"/> 的 `c.Self` 兜底），`a[0]` = 标记串，`a[1]` = out。
+    /// </summary>
+    private object? SuffixHas(EffectContext c, object? r, object?[] a, string key)
+    {
+        var card = AsCardOrId(c, a.ElementAtOrDefault(0)) ?? SelfArg(c, r, a);
+        string tag = StrArg(a, 0);
+        if (card is null || tag.Length == 0)
+        {
+            return false;
+        }
+
+        // 与引擎内部（`CardApi.ShouldTriggerDestructionEffect` 读 StopDestructionEffect）
+        // 共用同一个读法 —— 写方与读方分开实现过一次就会漂，这里不再留第二份。
+        return CustomNameHasAttribute(card, key, tag);
+    }
+
+    /// <summary>`GetCustomName2Attributes(out 属性数组)` —— 参考实现 `EngineHost.cs:1639`。</summary>
+    private object? SuffixList(EffectContext c, object? r, object?[] a, string key)
+    {
+        var card = AsCardOrId(c, a.ElementAtOrDefault(0)) ?? SelfArg(c, r, a);
+        if (card is null)
+        {
+            return new List<string>();
+        }
+
+        return JsonGetString(card, key)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
     }
 
     // ==================== 光环（aura）的实现 ====================
@@ -2185,7 +3500,7 @@ public sealed partial class CardApi
     /// <summary>光环式改费：**同一来源幂等**。</summary>
     private void ApplyAuraKreditCost(CardInstance aura, CardInstance target, int amount, int changeType)
     {
-        if (target.BuffsBySource.TryGetValue(aura.CardId, out var existing)
+        if (target.BuffsBySource.TryGetValue((aura.CardId, false), out var existing)
             && existing.KreditCost == amount
             && existing.KreditCostSetsAbsoluteValue == (changeType == ChangeTypeSetValue))
         {
@@ -2209,7 +3524,7 @@ public sealed partial class CardApi
 
     private void ApplyAuraOperationCost(CardInstance aura, CardInstance target, int amount)
     {
-        if (target.BuffsBySource.TryGetValue(aura.CardId, out var existing)
+        if (target.BuffsBySource.TryGetValue((aura.CardId, false), out var existing)
             && existing.OperationCost == amount)
         {
             return;
@@ -2230,7 +3545,7 @@ public sealed partial class CardApi
 
     private void ApplyAuraHeavyArmor(CardInstance aura, CardInstance target, int amount)
     {
-        if (target.BuffsBySource.TryGetValue(aura.CardId, out var existing)
+        if (target.BuffsBySource.TryGetValue((aura.CardId, false), out var existing)
             && existing.HeavyArmor == amount)
         {
             return;
@@ -2289,9 +3604,9 @@ public sealed partial class CardApi
     private void RemoveAuraBuffFrom(CardInstance aura, CardInstance target)
     {
         AuraTrace?.Add($"RemoveTheBuff: {aura.Definition.Name} → {target.Name}#{target.CardId}" +
-                       $"（buff槽={target.BuffsBySource.Count} 含本来源={target.BuffsBySource.ContainsKey(aura.CardId)}）");
+                       $"（buff槽={target.BuffsBySource.Count} 含本来源={target.BuffsBySource.ContainsKey((aura.CardId, false))}）");
 
-        if (!target.BuffsBySource.ContainsKey(aura.CardId))
+        if (!target.BuffsBySource.ContainsKey((aura.CardId, false)))
         {
             return;
         }
@@ -2351,7 +3666,7 @@ public sealed partial class CardApi
         // 认不出来时退回「有没有被任何来源 buff 过」——这是旧行为，比恒 false 安全。
         if (a.Length > 0 && a[0] is int sourceId && sourceId > 0)
         {
-            return target.BuffsBySource.ContainsKey(sourceId);
+            return target.BuffsBySource.ContainsKey((sourceId, false));
         }
 
         return target.BuffsBySource.Count > 0;
@@ -2440,8 +3755,13 @@ public sealed partial class CardApi
     private object? DoCustomAbilityAdd(EffectContext c, object? r, object?[] a)
     {
         // CustomAbilityAdd(能力名, 目标cardID, 施予者cardID, bool, bool, bool, out)
+        //
+        // ⚠️ `a[1]` 是**整数 cardID**（注释与调用点都是这个形状），
+        //    而旧实现用 `AsCard(a[1])` ⇒ **恒为 null** ⇒ 永远退回 `c.Target`。
+        //    对"目标是施法者自己"的调用点恰好等价，对指向别人的调用点就**静默打错卡**。
+        //    （与 `Array_Add` 那个 bug 同一族，见 `AsCardOrId` 的注释。）
         string ability = StrArg(a, 0);
-        var target = AsCard(a.ElementAtOrDefault(1)) ?? c.Target;
+        var target = AsCardOrId(c, a.ElementAtOrDefault(1)) ?? c.Target;
         if (target is not null && ability.Length > 0)
         {
             CustomAbilityAdd(target, ability, c.Self);
@@ -2452,7 +3772,7 @@ public sealed partial class CardApi
 
     private object? DoCustomAbilityRemove(EffectContext c, object? r, object?[] a)
     {
-        var target = AsCard(a.ElementAtOrDefault(1)) ?? c.Target;
+        var target = AsCardOrId(c, a.ElementAtOrDefault(1)) ?? c.Target;
         target?.CustomAbility = null;
         return null;
     }
@@ -2460,7 +3780,8 @@ public sealed partial class CardApi
     private object? DoSuppressUnit(EffectContext c, object? r, object?[] a)
     {
         // `SuppressUnit(卡, instigatorID, bool, bool, out)` —— 目标在 a[0]。
-        var target = AsCard(a.FirstOrDefault()) ?? AsCard(r) ?? c.Target;
+        // ⚠️ 同样可能是**整数 cardID**（与 `CustomAbilityAdd` 同一族），所以用 `AsCardOrId`。
+        var target = AsCardOrId(c, a.FirstOrDefault()) ?? AsCard(r) ?? c.Target;
         if (target is not null)
         {
             SuppressUnit(target);
@@ -2469,9 +3790,70 @@ public sealed partial class CardApi
         return null;
     }
 
+    /// <summary>
+    /// `SuppressMultipleUnits(cardsToSuppress, instigatorID, out qqq)`
+    /// —— `ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:35659`。
+    ///
+    /// 这是「抑制」的**真正实现体**（`SuppressUnit` 只是把单张卡包成数组转发进来，
+    /// 见同文件 `:36484`），所以派发表里两个键都必须在。
+    ///
+    /// 逐张调 <see cref="CardApi.SuppressUnit"/>：蓝图那一遍循环（`:35728-35738`
+    /// `Array_Length` → `Array_Get` → `GetCardFromID`）对每张卡做的唯一一件事就是
+    /// 走同一段 `SuppressMultipleUnits` 主体，所以"逐张调同一个函数"与蓝图等价。
+    ///
+    /// ⚠️ 队列要**先物化快照**：`SuppressUnit` 会跑触发器，触发器的效果可能
+    /// 反过来改这些卡（例如 `card_unit_cromwell_mk_iv`「When an enemy unit is pinned,
+    /// Suppress it.」那类连锁），在 `foreach` 里读正在被改的集合是错的
+    /// —— 与 `DoDamageMultipleCards`（本文件 `:2726`）同一条理由。
+    /// </summary>
+    private object? DoSuppressMultipleUnits(EffectContext c, object? r, object?[] a)
+    {
+        var targets = new List<CardInstance>(EvalArray(r, a));
+
+        foreach (var target in targets)
+        {
+            SuppressUnit(target);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 解析「**目标卡**」实参 —— **先看实参、再看 c.Target、最后才看接收者**，
+    /// 而且**整数 cardID 也认**。
+    ///
+    /// ## ⚠️⚠️ 顺序是关键（这是个大 bug）
+    ///
+    /// `PinUnit` / `GiveBlitz` / `GiveSmokescreen` / `GetAdjacentCards` 这一族的
+    /// 目标在 `args[0]`，而**接收者 `r` 恒为 `cardFunction`（= 施法的那张牌自己）**。
+    ///
+    /// 旧实现写成 `AsCard(r) ?? AsCard(a[0]) ?? c.Target` ——
+    /// `AsCard(r)` **永远命中且非 null** ⇒ **效果一律落到施法的那张牌上，目标从没被命中过**。
+    ///
+    /// 实测（对局 781364 / `card_event_monty`，卡面
+    /// 「Pin target unit **and adjacent units**」）：**一个单位都没钉住** ——
+    /// 用户看到"被钉住的单位还能移动"。自测 `PinTargetsCorrectUnits` 复现。
+    ///
+    /// 全卡池扫描（实参是整数 cardID 的调用点）：
+    /// `PinUnit` **69 处**、`GiveBlitz` **37 处**、`GiveShock` 12、`GiveGuard` 4 …
+    /// ⇒ 影响面远大于一张卡。
+    ///
+    /// 对照：<see cref="SelfArg"/> 是「先接收者、后实参」—— 那一族的语义确实是"自己"，
+    /// 顺序相反是对的。**"目标"和"自己"两类原语不能用同一套解析顺序。**
+    /// </summary>
+    private static CardInstance? TargetArg(EffectContext c, object? receiver, object?[] args)
+    {
+        if (args.Length > 0 && AsCardOrId(c, args[0]) is { } fromArgs)
+        {
+            return fromArgs;
+        }
+
+        return c.Target ?? AsCard(receiver) ?? c.Self;
+    }
+
     private object? DoGiveKeyword(EffectContext c, object? r, object?[] a, string keyword)
     {
-        var target = AsCard(r) ?? AsCard(a.FirstOrDefault()) ?? c.Target;
+        var target = TargetArg(c, r, a);
         if (target is not null)
         {
             GiveKeyword(target, keyword);
@@ -2482,10 +3864,26 @@ public sealed partial class CardApi
 
     private object? DoRemoveKeyword(EffectContext c, object? r, object?[] a, string keyword)
     {
-        var target = AsCard(r) ?? AsCard(a.FirstOrDefault()) ?? c.Target;
+        var target = TargetArg(c, r, a);
         if (target is not null)
         {
             RemoveKeyword(target, keyword);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// `PinUnit` —— 与 <see cref="DoGiveKeyword"/> 同一套目标解析（`TargetArg`），
+    /// 但落到 <see cref="CardApi.PinUnit"/> 上，因为钉住还要记 `pinnedTurns`
+    /// （出处 `BP_CardFunctions::PinUnit` i=955，见那个方法的注释）。
+    /// </summary>
+    private object? DoPinUnit(EffectContext c, object? r, object?[] a)
+    {
+        var target = TargetArg(c, r, a);
+        if (target is not null)
+        {
+            PinUnit(target);
         }
 
         return null;
@@ -2517,6 +3915,40 @@ public sealed partial class CardApi
     ///
     /// 注意 `Parameters[0]` 也可能是 `InstanceVariable cardID`（自我引用），
     /// 那种情况下 <see cref="AsCard"/> 取不到卡，自然回退到接收者 —— 仍然正确。
+    ///
+    /// ## ★★ 2026-10-02：`Parameters[0]` 的**整数 cardID 形状**必须认（对局 `773639` #45 的根因）
+    ///
+    /// 上面那句"取不到卡就回退到接收者"**在目标是别人时不成立**。实测
+    /// `card_event_fog_of_war`（IR i=10）：
+    /// <code>
+    /// RemoveCardFromBoard(cardID@K2Node_Event_targetCard, cardID@self, out qqq)
+    /// </code>
+    /// 两个实参**都是 int**（`cardID` 是 `BaseCardObject.h` 上的 int 成员），
+    /// 而接收者是 `cardFunction` = **施法者自己**（见 `KismetVm.Frame` 的
+    /// `_locals["cardFunction"] = ctx.Self`）。于是旧实现返回的是**雾战这张指令自己**，
+    /// `RemoveCardFromBoard` 把"弃牌堆里的自己"再 Move 到弃牌堆 —— **静默空转**：
+    /// 不报错、不记缺口、目标纹丝不动。
+    ///
+    /// 后果链（`out/_server-replays/replay-773639`）：
+    /// <code>
+    /// #25 t7 R ML {"0":"60"}   ; bot 把 card_unit_1st_airborne#60 推上前线 ⇒ 归属=Right
+    /// #29 t7 L PC {"0":"19","2":"60"}  ; 人类打 19=card_event_fog_of_war，目标 #60
+    ///                          ; 客户端：移除成功 ⇒ 前线空 ⇒ 归属释放
+    ///                          ; 我们：空转 ⇒ #60 一直挂在前线（审计① 到 #64 t13 才离场）
+    /// #45 t9 L ML {"0":"21"}   ; 人类推前线 ⇒ 被互斥门拒（归属仍是 Right）
+    /// </code>
+    /// 审计 ⑤b 首个人类失败点 = `#45 t9 ML：移动被拒：前线被对面占着（前线归属=Right，本单位=Left）`。
+    ///
+    /// 权威签名（`ref/kards-sim/KardsSim/Generated/BP_CardFunctions.g.cs:4202`）：
+    /// `["RemoveCardFromBoard"] = new[] { "cardID", "discarderID", "qqq" }` ——
+    /// 第 0 个参数**就是 int 卡 ID**，同族还有 `DestroyCard` / `DamageCard` 等
+    /// （全部 10 个 `TargetCard` 调用点的第 0 参都是"目标卡"）。
+    ///
+    /// 修法：把「参数」这一段拆成两步 —— 先扫**卡对象**（老行为，一个字没改），
+    /// 再单独看 `args[0]` 的**整数卡 ID**。只看 `[0]`、不看 `[1..]`，是因为
+    /// 那些位置在蓝图的签名里是 `instigatorID` / 数值，扫下去会把"伤害 3 点"
+    /// 当成"cardID=3"（`HealCard(0, 3)` 这种非指向性调用会凭空挑中 3 号卡）。
+    /// 指向**自己**的卡 ID 也跳过 —— 那一支本来就该回退到接收者（老行为）。
     /// </summary>
     private static CardInstance? TargetCard(EffectContext c, object? receiver, object?[] args)
     {
@@ -2526,6 +3958,15 @@ public sealed partial class CardApi
             {
                 return explicitTarget;
             }
+        }
+
+        // 参数位 [0] 是**整数卡 ID**（`RemoveCardFromBoard(cardID, …)` 这一族）。
+        // ⚠️ 只认真正的 `int`，不走 `AsInt` —— `AsInt(true) == 1` 会挑中 1 号卡。
+        if (args.Length > 0 && args[0] is int targetId && targetId != 0
+            && c.State.ById(targetId) is { } byId
+            && !ReferenceEquals(byId, c.Self))
+        {
+            return byId;
         }
 
         return AsCard(receiver) ?? c.Target ?? c.Self;
@@ -2578,6 +4019,89 @@ public sealed partial class CardApi
     }
 
     internal static List<CardInstance> AsList(object? v) => v as List<CardInstance> ?? new List<CardInstance>();
+
+    /// <summary>
+    /// 把「数组元素」实参解析成卡 —— **可能是卡对象，也可能是整数 cardID**。
+    ///
+    /// ⚠️⚠️ **两种形状实测都存在**，而旧实现（`AsCard(a[^1])`）只认卡对象：
+    /// <list type="bullet">
+    /// <item>`card_event_pams.GetChooseSpawnCards`：<c>Array_Add(PossibleCards, localvariable Item)</c>
+    ///   → **卡对象**（所以那条路一直是对的，掩盖了这个 bug）。</item>
+    /// <item>`card_event_forward_observers`：<c>Array_Add(unitsToDamage, {var:cardID, ctx:unit})</c>
+    ///   → **整数 cardID**（`GetMember(unit,"cardID")` 返回 int）。</item>
+    /// </list>
+    ///
+    /// 只认卡对象 ⇒ 整数 ID 一律被静默丢掉 ⇒ 目标数组**恒为空**。
+    ///
+    /// **实测后果**（雪雾 2026-10-01）：`card_event_forward_observers`
+    /// （卡面 Deal 2 damage to all enemy units）**一点伤害都不打** ——
+    /// 客户端那边被打死的单位，我们这边还活着 ⇒ **AI 去移动那些"已经死了"的单位**。
+    ///
+    /// 全卡池扫描：**94 张卡**用整数 ID 形状攒数组
+    /// （`anzac_spirit` / `firestorm_skirm` / `carpet_bombing` / `shelling` /
+    ///  `blockade` / `red_skies_skirm` / `the_end_is_near_skirm` …）——
+    /// 也就是**所有"对敌方全体造成伤害"的卡**。
+    /// </summary>
+    /// <summary>
+    /// 往蓝图数组里追加一个元素，**按目标数组的元素类型归一**：
+    /// <list type="bullet">
+    /// <item><c>List&lt;int&gt;</c>（<c>TArray&lt;int&gt;</c>，例
+    ///       <c>card_event_semper_fi</c> 的 <c>cardsToRandom = GetDeckByside(side)</c>）
+    ///       —— 存**整数**，不能解析成卡实例，否则后续
+    ///       <c>Array_Get</c> / <c>RandomIntFromRangeWithStream</c> 的元素类型对不上。</item>
+    /// <item><c>List&lt;CardInstance&gt;</c>（<c>TArray&lt;UObject*&gt;</c>，例
+    ///       <c>PossibleCards</c> / <c>cardsToDamage</c>，由
+    ///       <c>KismetVm.SeedArrayTarget</c> 播种）—— 走 <see cref="AsCardOrId"/>，
+    ///       整数卡 ID 也要能塞进去（全卡池 94 张卡用整数 ID 形状攒数组，
+    ///       见 <see cref="AsCardOrId"/> 的注释）。</item>
+    /// </list>
+    /// 混用会让 <c>List&lt;CardInstance&gt;.Add(装箱 int)</c> 直接抛
+    /// <c>InvalidCastException</c>，所以两种目标必须分开处理。
+    /// </summary>
+    private static void ArrayAppendOne(EffectContext c, System.Collections.IList arr, object? v)
+    {
+        if (arr is List<int> ids)
+        {
+            ids.Add(v is CardInstance ci ? ci.CardId : AsInt(v));
+        }
+        else if (arr is List<CardInstance> cards && AsCardOrId(c, v) is { } item)
+        {
+            cards.Add(item);
+        }
+    }
+
+    /// <summary>
+    /// 蓝图数组元素的**值比较**（`Array_Contains` / `Array_Remove` / `Array_RemoveItem` 用）。
+    ///
+    /// 两种元素表示都要认，而且可以**混在同一个数组里**：
+    /// <list type="bullet">
+    /// <item>卡实例（<c>TArray&lt;UObject*&gt;</c>，例 `GetCardsOnBoardBySide` 的 `Cards`）</item>
+    /// <item>整数卡 ID（<c>TArray&lt;int&gt;</c>，例 `GetDeckByside` 的 `deckCardIDs`；
+    ///       见 <see cref="CardApi.GetDeckBySide"/> 的注释）</item>
+    /// </list>
+    /// 全卡池有 94 张卡用**整数 ID 形状**攒数组（见 <see cref="AsCardOrId"/> 的注释），
+    /// 所以"拿整数 ID 去查一个装着实例的数组"也必须命中 —— 这一条在
+    /// `AsCardOrId` 那一族里已经是既成事实。
+    ///
+    /// 旧写法是 `ReferenceEquals(x, y) || x.CardId == y.CardId`，
+    /// 只对"两边都是卡实例"成立；ID 数组上 `AsInt(卡实例)=0` ⇒ 恒假。
+    /// </summary>
+    private static bool SameArrayValue(object? x, object? y)
+        => ReferenceEquals(x, y) || IdOf(x) == IdOf(y);
+
+    /// <summary>数组元素的「整数身份」：卡实例取它的卡 ID，别的走 <see cref="AsInt"/>。</summary>
+    private static int IdOf(object? v) => v is CardInstance c ? c.CardId : AsInt(v);
+
+    private static CardInstance? AsCardOrId(EffectContext c, object? v)
+    {
+        if (AsCard(v) is { } card)
+        {
+            return card;
+        }
+
+        int id = AsInt(v);
+        return id != 0 ? c.State.ById(id) : null;
+    }
 
     internal static int AsInt(object? v) => v switch
     {
@@ -2640,6 +4164,31 @@ public sealed partial class CardApi
     }
 
     /// <summary>
+    /// 取「阵营实参」，**只认真正的阵营值**（<c>int</c> 1/2 或 <see cref="Side"/>），
+    /// 读不到就返回 <c>null</c> —— 与 <see cref="SideArg"/> 的唯一区别是**不做兜底**。
+    ///
+    /// 为什么需要它：<c>IsSameSideUnit</c> 的判据是「**这张卡**属于**这个阵营**吗」。
+    /// 一旦退回 <see cref="SideArg"/> 的兜底（<c>receiver.Owner</c>），
+    /// 就退化成「卡属于它自己的阵营」⇒ **判据恒真**，比返回 false 更危险
+    /// （会把"必须是友方单位"的门全部放行）。所以这类"查 A 是否等于 B"的原语
+    /// 一律用这个不兜底的版本。
+    /// </summary>
+    internal static Side? SideArgOrNull(object?[] args, int index)
+    {
+        if (index >= args.Length)
+        {
+            return null;
+        }
+
+        return args[index] switch
+        {
+            int i when i is 1 or 2 => (Side)i,
+            Side s when s != Side.NotAvailable => s,
+            _ => null,
+        };
+    }
+
+    /// <summary>
     /// 「我方」阵营 —— 给那些**没有入参、隐含以卡自己为上下文**的原语用
     /// （目前已知只有 <c>GetOppositeSide</c>）。
     /// 优先取卡自己的 owner，退回效果控制方。
@@ -2652,6 +4201,347 @@ public sealed partial class CardApi
         }
 
         return c.Controller;
+    }
+
+    // ==================================================================
+    //  ★★ 目标合法性门（2026-10-02）
+    //
+    //  背景：真人玩家报告「有一些**有指定向指令或部署效果**的单位或指令
+    //  （例：使一个敌方/友方**空军**撤退；或只能指定**老兵**单位），
+    //  模拟器里好像没有限制条件，人机可以随意指定」。
+    //
+    //  客户端**有两道**目标门，缺一不可（枚举主循环 `_deps/BP_Logic.g.cs:1235-1355`）：
+    //  <code>
+    //  遍历 GetAllCardInBattle:
+    //      _card.targetOverride = 候选卡
+    //      _card.CanPlayFromHand(out canIt, …, out targetedCard)   ← ① 卡自己的判据
+    //      if (!canIt || !IsValid(targetedCard)) continue
+    //      CanSelectAsTarget(候选卡, _card, byPlayFromHand: True, …) ← ② 规则库的门
+    //      if (can) → 这个候选合法
+    //  </code>
+    //
+    //  ① 才是「只能指定空军 / 老兵 / 敌方」那一道（438 张卡的 `CanPlayFromHand` 里
+    //     写着 `IsAirUnit` 13 / `IsVeteran` 2 / `IsGroundUnit` 17 / `IsSameSideUnit` 131 …）；
+    //  ② 只管隐蔽 / 敌方指令 / 费用 / 被指方自身 / 触发点 2 否决位。
+    //  ⇒ **两道都实现、都过，才算把客户端的门补齐**。
+    // ==================================================================
+
+    /// <summary>
+    /// 一次目标判定的结果。`Reason` 沿用**蓝图自己的失败原因字符串**
+    /// （`"air_unit"` / `"veteran_unit"` / `"enemy_air_or_infantry_unit"` /
+    /// `"cant_be_targeted_by_enemy_orders"` / `"cost_extra_to_target"` …），
+    /// 不是我们发明的词 —— 审计与日志里能直接和客户端文案对上。
+    /// </summary>
+    public readonly record struct TargetCheck(bool Can, string Reason, string ReasonParam1, string ReasonParam2)
+    {
+        /// <summary>放行。</summary>
+        public static TargetCheck Ok { get; } = new(true, "", "", "");
+
+        /// <summary>失败原因（带参数时拼上），用于日志/自测断言。</summary>
+        public string Describe()
+            => Can ? "ok" : (ReasonParam1.Length > 0 ? $"{Reason}({ReasonParam1})" : Reason);
+
+        public override string ToString() => Describe();
+    }
+
+    /// <summary>
+    /// ★★ `cardsCheckFunctions.CanSelectAsTarget` —— 规则库的**目标合法性门**，
+    /// 逐句移植 `ref/kards-sim/KardsSim/Generated/_deps/cardsCheckFunctions.g.cs:1052-1219`。
+    ///
+    /// ## 签名与语义（8 个形参，权威参数表见 `Generated/_index.g.cs:1850`）
+    /// <code>
+    /// CanSelectAsTarget(Targeted, Targeting, byPlayFromHand, __WorldContext,
+    ///                   out can, out Reason, out ReasonParam1, out ReasonParam2)
+    /// </code>
+    /// · `Targeted` —— **候选目标那张卡**（被指定的）
+    /// · `Targeting` —— **正在指定别人的那张卡**（施法方 / 攻击方）
+    /// · `byPlayFromHand` —— 这次判定是不是「从手牌打出」触发的。
+    ///   客户端选目标走 `BP_Logic.g.cs:1312`（传 **True**）；攻击走
+    ///   `CanAttack` 的 `g.cs:902`（传 **False**）。
+    /// · 四个出参只有 `can` / `Reason` 有用（后两个是给 UI 文案做参数替换的）
+    /// · **无副作用**（纯判定）
+    ///
+    /// ## 判据（按 `g.cs` 语句顺序）
+    /// <list type="number">
+    /// <item>`IsValid(Targeted)` 假 → 早退（`can` 保持 false）</item>
+    /// <item>`IsLocatedOnBoard(Targeted)` 假 → 早退。
+    ///   ⚠️ 这里必须是**蓝图语义**（`Loc is Board or Frontline`，**含 HQ**），
+    ///   不是内核 `CardApi.IsLocatedOnBoard`（那个排除 HQ，见 `MakeCardsFight` 的注释）。
+    ///   用错会把「指定 HQ」全部拒掉（`card_event_the_commonwealth` 这类牌直接废掉）。</item>
+    /// <item>未揭示隐蔽卡 + 从手牌打出 + 施法方没有 `canTargetCovert`
+    ///   → 拒，`cant_target_unrevealed`。（本内核 `IsUnrevealedCovertCard` 是
+    ///   **恒 false 的桩**，所以这一支实际不会触发 —— 照抄形状是为了将来 Covert 落地时不用再翻一遍）</item>
+    /// <item>目标是敌方指令的禁指对象（`cantBeTargetedByEnemyOrder`）→ 拒，
+    ///   `cant_be_targeted_by_enemy_orders`。（卡池里 5 张，与卡面串名一致）</item>
+    /// <item>费用：`kredit(Targeting.side) - (byPlayFromHand ? 卡费 : 行动费) &lt; 0` → 拒，
+    ///   `play_from_hand_not_enough_kredits_to_target` / `not_enough_kredits_to_target`。
+    ///   `SelectInt(A, B, cond)` = **cond ? A : B**（取证：`card_event_the_commonwealth` 的
+    ///   `SelectInt(20, 0, HQ防御>=30)`、`card_unit_type_97_cam1` 的 `SelectInt(2, 1, 有战役升级)`）。</item>
+    /// <item>再加「被敌方指定的额外税」`KreditsTax_AsEnemyTarget`（**同阵营不付税**）
+    ///   → 不够则 `cost_extra_to_target`。</item>
+    /// <item>`Targeted.isSuppressed || CanBeTargetted(Targeted, Targeting, byPlayFromHand)`
+    ///   为假 → 拒（原因取 `CanBeTargetted` 的）。</item>
+    /// <item>`CanOtherCardBeTargetted(...)`（触发点 2 的否决位）为假 → 拒。</item>
+    /// </list>
+    ///
+    /// ## ⚠️⚠️ 它**不判**「目标类型」（空军 / 老兵 / 地面 / 敌我）
+    ///
+    /// 那一道在**每张卡自己的 `CanPlayFromHand`** 里 —— 见 <see cref="CanPlayFromHandOn"/>。
+    /// 玩家报告的「只能指定空军 / 只能指定老兵」不在这里。把两道门混成一道，
+    /// 就会写出一个"看起来实现了、其实一张空军牌都管不住"的门。
+    /// </summary>
+    /// <param name="targeting">正在指定别人的卡（施法/攻击方）。</param>
+    /// <param name="targeted">候选目标卡。</param>
+    /// <param name="byPlayFromHand">是否「从手牌打出」这条路径（选目标恒为 true）。</param>
+    public TargetCheck CanSelectAsTarget(CardInstance? targeting, CardInstance? targeted, bool byPlayFromHand)
+    {
+        // ① IsValid(Targeted)
+        if (targeting is null || targeted is null)
+        {
+            return new TargetCheck(false, "invalid", "", "");
+        }
+
+        // ② IsLocatedOnBoard(Targeted) —— 蓝图语义（含 HQ）
+        if (!targeted.Location.IsBoard())
+        {
+            return new TargetCheck(false, "not_on_board", "", "");
+        }
+
+        // ③ 未揭示的隐蔽卡（内核桩：IsUnrevealedCovertCard 恒 false）
+        if (IsUnrevealedCovertCard(targeted) && byPlayFromHand
+            && !CustomNameHasAttribute(targeting, "customName1", "canTargetCovert"))
+        {
+            return new TargetCheck(false, "cant_target_unrevealed", "", "");
+        }
+
+        // ④ 敌方指令不能指定它
+        if (CustomNameHasAttribute(targeted, "customName1", "cantBeTargetedByEnemyOrder")
+            && targeted.Owner != targeting.Owner
+            && IsOrder(targeting))
+        {
+            return new TargetCheck(false, "cant_be_targeted_by_enemy_orders", "", "");
+        }
+
+        // ⑤ 费用够不够（`SelectInt(卡费, 行动费, byPlayFromHand)` = byPlayFromHand ? 卡费 : 行动费）
+        int cost = byPlayFromHand ? targeting.KreditCost : targeting.OperationCost;
+        int remaining = State.Kredits(targeting.Owner) - cost;
+        if (remaining < 0)
+        {
+            return new TargetCheck(false,
+                byPlayFromHand ? "play_from_hand_not_enough_kredits_to_target" : "not_enough_kredits_to_target",
+                "", "");
+        }
+
+        // ⑥ 额外税（`SelectInt(0, 税, 同阵营)` = 同阵营 ? 0 : 税）
+        int tax = targeting.Owner == targeted.Owner ? 0 : targeted.KreditsTaxAsEnemyTarget;
+        if (remaining < tax)
+        {
+            return new TargetCheck(false, "cost_extra_to_target", tax.ToString(), "");
+        }
+
+        // ⑦ 被指方自身（被压制的卡直接放行 —— 蓝图是 `isSuppressed || canIt`）
+        if (!targeted.IsSuppressed)
+        {
+            var canBe = CanBeTargetted(targeted, targeting, byPlayFromHand);
+            if (!canBe.Can)
+            {
+                return canBe;
+            }
+        }
+
+        // ⑧ 触发点 2 的否决位
+        return CanOtherCardBeTargetted(targeting, targeted, byPlayFromHand);
+    }
+
+    /// <summary>
+    /// `UBaseCardObject::CanBeTargetted(out canIt, out Reason, out p1, out p2, targettingCard, byPlayFromHand)`
+    /// —— **被指方自身**的「我能不能被指定」判定。
+    ///
+    /// ⚠️ **诚实标注：这是推断，不是移植。** 它是 `BlueprintNativeEvent`，
+    /// 真实函数体编译在游戏二进制里；随附源码里 `CanBeTargetted_Implementation`
+    /// 是空体。参考实现（`ref/kards-sim/KardsSim/Bridge/EngineHost.cs:1125-1172`）
+    /// 也明确写了同一句话，并给出结论：**默认放行，只拦"数据里有依据"的限制**，
+    /// 而唯一有依据的那条就是 `cantBeTargetedByEnemyOrder`。
+    ///
+    /// 那条在 <see cref="CanSelectAsTarget"/> 的 ④ 里**已经判过**（蓝图自己也在
+    /// 两处重复判了同一件事）。所以这里返回放行 —— 不是"没实现"，而是
+    /// 「已实现的部分与 ④ 同源，剩下的部分连客户端都只存在于二进制里」。
+    /// 将来若在数据里发现新的限制依据，落点就是这里。
+    /// </summary>
+    private static TargetCheck CanBeTargetted(CardInstance targeted, CardInstance targeting, bool byPlayFromHand)
+    {
+        _ = targeted;
+        _ = targeting;
+        _ = byPlayFromHand;
+        return TargetCheck.Ok;
+    }
+
+    /// <summary>
+    /// `cardsCheckFunctions.CanOtherCardBeTargetted`（库版，`g.cs:963-1048`）——
+    /// 遍历 `FetchAllCardsWithEventTrigger(GameState, 2)`，对每张注册卡调**卡版**同名函数，
+    /// **任何一张回 false 就整体否决**。
+    ///
+    /// 触发点 2 = `Trigger.CanOtherCardBeTargetted`
+    ///（`ref/kards-sim/KardsSim/Core/Trigger.g.cs:12`）。
+    ///
+    /// ⚠️ 本内核没有「按触发点索引卡」的订阅表，所以这里是**空集 ⇒ 不否决**。
+    /// 这不是猜，有三条证据：
+    /// <list type="number">
+    /// <item>全卡池 **1735 张卡只有 1 张**实现它 ——
+    ///   `Generated/Britain/Breakthrough/units/card_unit_no_3_commando.g.cs:24-82`；</item>
+    /// <item>那张卡的**第一条**判据就是 `Not_PreBool(byPlayFromHand)`
+    ///   （同文件 `i=0`，`g.cs` 直译版 `L_0000`），`byPlayFromHand=True` 时
+    ///   整个 AND 恒假 ⇒ 直接落到 else 分支 `canIt = True`；</item>
+    /// <item>而本门（选目标）**恒以 `byPlayFromHand=True` 调用**
+    ///   （`BP_Logic.g.cs:1312` 传的就是 `Val.True`）。</item>
+    /// </list>
+    /// ⇒ 在「从手牌指定目标」这条路上，触发点 2 的否决位对**全卡池都是空操作**。
+    /// （它在 `CanAttack` 那条路上才有意义 —— `g.cs:902` 传 `False`。）
+    /// </summary>
+    private static TargetCheck CanOtherCardBeTargetted(CardInstance targeting, CardInstance targeted,
+                                                       bool byPlayFromHand)
+    {
+        _ = targeting;
+        _ = targeted;
+        _ = byPlayFromHand;
+        return TargetCheck.Ok;
+    }
+
+    /// <summary>
+    /// ★★ **卡自己的**目标判据 —— 执行这张卡的 `CanPlayFromHand`（IR 的 `locals`），
+    /// 把候选目标当作客户端的 `targetOverride` 传进去。
+    ///
+    /// ## 为什么必须执行函数体，而不是写一条 C# 规则
+    ///
+    /// 全卡池 **438 张卡**各自实现了它，判据五花八门（`card-ir.json` 的
+    /// `locals.CanPlayFromHand` 全量统计，45 个不同被调函数）：
+    /// <code>
+    /// card_event_aa_barrage       "Target air unit must retreat"
+    ///     → IsAirUnit(目标) ? (HasCustomAbility(目标,"cantRetreat") ? 拒 : 放) : 拒("air_unit")
+    /// card_event_breakout         "…"
+    ///     → IsVeteran(目标) ? 放 : 拒("veteran_unit")
+    /// card_unit_m16_halftrack     "An enemy air or infantry unit must retreat"
+    ///     → 敌方 && (IsAirUnit || IsInfantry) ? … : 拒("enemy_air_or_infantry_unit")
+    /// </code>
+    /// 「一条通用公式」不可能存在 —— 唯一忠实的做法是**跑那张卡自己的函数体**，
+    /// 与 `GetPlayFromHandDamage` / `GetChooseSpawnCards` 走的是同一条路
+    /// （`KismetVm.RunLocalProgramMulti` + `CardApi.RunOwnLocal`）。
+    ///
+    /// ## 为什么 IR 里原来没有它
+    ///
+    /// `klink bot/tools/gen-kismet-ir.py` 的 `LOCAL_FUNCTIONS` 是一个**白名单**，
+    /// 以前只有 78 个名字，注释里明写「别的局部函数（`CanPlayFromHand` /
+    /// `ShouldHighlightInHand` …）有各自的调用路径，不在这次修复范围内」。
+    /// 本次把它加进白名单并重生成 `card-ir.json`
+    /// （已验证：`steps` / `entrypoints` **逐字节不变**，只多了 438 个 `locals` 条目）。
+    ///
+    /// ## 返回值
+    ///
+    /// 这张卡**没有** `CanPlayFromHand` ⇒ 客户端也没有这道门 ⇒ **放行**，
+    /// 而且**不计**未实现（"没有这道门"是事实，不是缺口）。
+    ///
+    /// ## ⚠️ 为什么"跑一遍函数体"是安全的（不会污染局面）
+    ///
+    /// 这个方法会在**候选枚举**里被逐张候选调用（`MatchEngine.LegalPlayTargets`），
+    /// 而 `NnPolicy.Choose` 是**在实时引擎 `live` 上**枚举的
+    ///（`verifyEveryReplay: false`，见 `BotTurnService.cs:528`）——
+    /// 万一门有副作用，就会把实时局面改掉而没人发现。
+    ///
+    /// 所以把 438 张卡的 `CanPlayFromHand` 函数体里**所有被调函数**扫了一遍
+    ///（`card-ir.json` 全量统计，**45 种**）：`GetTargetedCard`(431) / `IsUnit`(201) /
+    /// `IsSameSideUnit`(132) / `GetOppositeSide`(125) / `HasCampaignUpgrade`(30) /
+    /// `IsTank`(29) / `IsInfantry`(29) / `HasCustomAbility`(25) / `Array_Get`(20) /
+    /// `getTotalAttack`(20) / `getAndDecryptKredit`(19) … ——
+    /// **全部是只读谓词/取值**，没有任何 `Change*` / `Damage*` / `Destroy*` / `Spawn*` /
+    /// `Pin*` / `MakeCardRetreat`。唯一一个写操作是 `Array_Clear`（1 处，
+    /// 清的是**函数自己的局部数组**，不进引擎状态）。
+    ///
+    /// 另外 `RunOwnLocal` 自带独立的 `Frame` + `EffectContext`，共享的可变状态只有
+    /// VM 的计数器与 `_triggerDepth`。⇒ 这道门是纯函数。
+    /// **将来若某张卡的 `CanPlayFromHand` 里出现写操作，这条结论就失效** ——
+    /// 那时要么把它做成"在副本上判"，要么把副作用单独摘出来。
+    /// </summary>
+    public TargetCheck CanPlayFromHandOn(CardInstance card, CardInstance? target)
+    {
+        var outs = RunOwnLocal(
+            card, "CanPlayFromHand",
+            new Dictionary<string, object?>(StringComparer.Ordinal) { ["toCard"] = target },
+            "canIt", "reason", "reasonParam1", "reasonParam2", "targetedCard");
+
+        if (outs is null)
+        {
+            return TargetCheck.Ok;
+        }
+
+        return new TargetCheck(
+            Blueprint.KismetVm.Truthy(outs.GetValueOrDefault("canIt")),
+            outs.GetValueOrDefault("reason") as string ?? "",
+            outs.GetValueOrDefault("reasonParam1") as string ?? "",
+            outs.GetValueOrDefault("reasonParam2") as string ?? "");
+    }
+
+    /// <summary>
+    /// ★★ **两道门一起过** —— 这就是客户端选一个目标时的完整判据
+    /// （`BP_Logic.g.cs:1235-1355` 的循环体，顺序也一致）。
+    ///
+    /// 调用方：`NnPolicy` / `GreedyBot` / `BotTurnService` 的**候选枚举**，
+    /// 以及 `ReplayRunner` 的**目标校验**。
+    ///
+    /// ⚠️ `target` 为 null 时返回**拒绝**（`no_target`）：调用方必须先判
+    /// "这张牌到底需不需要目标"（`Definition.ExternalCalls` 含 `GetTargetedCard`），
+    /// 不要拿 null 当"无目标合法"。
+    /// </summary>
+    public TargetCheck CanTarget(CardInstance card, CardInstance? target, bool byPlayFromHand = true)
+    {
+        if (target is null)
+        {
+            return new TargetCheck(false, "no_target", "", "");
+        }
+
+        // ① 卡自己的 CanPlayFromHand（客户端枚举里先调的就是它）
+        var own = CanPlayFromHandOn(card, target);
+        if (!own.Can)
+        {
+            return own;
+        }
+
+        // ② 规则库的 CanSelectAsTarget
+        return CanSelectAsTarget(card, target, byPlayFromHand);
+    }
+
+    /// <summary>派发表适配器：把 IR 的 8 个实参映射到 <see cref="CanSelectAsTarget"/> 的 4 个出参。</summary>
+    /// <remarks>
+    /// 实参形状（`CanAttack` 的调用点 `_deps/cardsCheckFunctions.g.cs:902`）：
+    /// <c>[Targeted, Targeting, byPlayFromHand, __WorldContext, out can, out Reason, out p1, out p2]</c>
+    /// —— 接收者是 `Val.Ref("cardsCheckFunctions")`，不在实参里（见 `KismetVm.cs:528` 的约定）。
+    /// IR 里这个函数的调用点目前是 **0**（全在规则库里，规则库不在 IR 里），
+    /// 注册它是为了让"名字 → 实现"可查，不是为了让缺口数字好看。
+    /// </remarks>
+    private object? InvokeCanSelectAsTarget(EffectContext c, object?[] a)
+    {
+        var targeted = AsCardOrId(c, a.ElementAtOrDefault(0));
+        var targeting = AsCardOrId(c, a.ElementAtOrDefault(1));
+        bool byPlayFromHand = TruthyArg(a, 2);
+        var r = CanSelectAsTarget(targeting, targeted, byPlayFromHand);
+        return new object?[] { r.Can, r.Reason, r.ReasonParam1, r.ReasonParam2 };
+    }
+
+    /// <summary>
+    /// `AddKreditsTax(card, costToAdd, instigatorID, out qqq)` —— 见派发表里那条的注释。
+    /// 函数体全文：`IsValid(card)` → `Max(0, 当前 + costToAdd)` → 写回 →
+    /// `IsActionProcess` 时通知客户端（本内核无 notifier，不实现）→ `qqq = False`。
+    /// </summary>
+    private object? DoAddKreditsTax(EffectContext c, object?[] a)
+    {
+        var card = AsCardOrId(c, a.ElementAtOrDefault(0));
+        if (card is null)
+        {
+            // 蓝图那一支只写一条 `DirectClientLogger`（纯客户端日志），`qqq` 仍为 False
+            return false;
+        }
+
+        card.KreditsTaxAsEnemyTarget = Math.Max(0, card.KreditsTaxAsEnemyTarget + AsInt(a.ElementAtOrDefault(1)));
+        return false;
     }
 }
 
