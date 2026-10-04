@@ -11,6 +11,14 @@ namespace KLink.Bot.Engine;
 /// </summary>
 public sealed class GameState
 {
+    public sealed class GameplayRestriction
+    {
+        public required Side Side { get; init; }
+        public required GameplayRestrictionType Type { get; init; }
+        public required int SourceCardId { get; init; }
+        public int TurnsRemaining { get; set; }
+    }
+
     /// <summary>左/右两侧，索引 1/2（与 <see cref="Side"/> 对齐，0 位弃用）。</summary>
     private readonly List<CardInstance>[] _cardsBySide = { new(), new(), new() };
 
@@ -38,6 +46,61 @@ public sealed class GameState
     public UeRandomStream Random { get; }
     public ulong Seed { get; }
 
+    // BP_GameState_Battle stores signed updates and returns Abs_Int on query.
+    private readonly int[] _kreditSlotsLost = new int[3];
+    public int KreditSlotsLost(Side side) => Math.Abs(_kreditSlotsLost[(int)side]);
+    public void RecordKreditSlotLoss(Side side) => _kreditSlotsLost[(int)side]--;
+
+    /// <summary>
+    /// Active global restrictions from `FGameplayRestrictionEffect`.
+    /// A restriction is keyed by affected side, type, and source card ID;
+    /// multiple sources of the same type may coexist.
+    /// </summary>
+    public List<GameplayRestriction> GameplayRestrictions { get; } = new();
+
+    public bool HasGameplayRestriction(Side side, GameplayRestrictionType type)
+        => GameplayRestrictions.Any(x => x.Side == side && x.Type == type && x.TurnsRemaining != 0);
+
+    public void AddGameplayRestriction(Side side, GameplayRestrictionType type, int sourceCardId, int turns)
+    {
+        var existing = GameplayRestrictions.FirstOrDefault(x =>
+            x.Side == side && x.Type == type && x.SourceCardId == sourceCardId);
+        if (existing is not null)
+        {
+            existing.TurnsRemaining = Math.Max(existing.TurnsRemaining, turns);
+            return;
+        }
+
+        GameplayRestrictions.Add(new GameplayRestriction
+        {
+            Side = side,
+            Type = type,
+            SourceCardId = sourceCardId,
+            TurnsRemaining = turns,
+        });
+    }
+
+    public void RemoveGameplayRestriction(Side side, GameplayRestrictionType type,
+        int sourceCardId, bool removeAll)
+    {
+        GameplayRestrictions.RemoveAll(x => x.Side == side && x.Type == type
+            && (removeAll || x.SourceCardId == sourceCardId));
+    }
+
+    /// <summary>Called at the start of a global turn, matching DecrementTurnGameplayRestrictions.</summary>
+    public void DecrementGameplayRestrictions()
+    {
+        foreach (var restriction in GameplayRestrictions)
+        {
+            if (restriction.TurnsRemaining > 0)
+            {
+                restriction.TurnsRemaining--;
+            }
+        }
+
+        GameplayRestrictions.RemoveAll(x => x.TurnsRemaining == 0);
+    }
+
     public int Turn { get; set; } = 1;
     public Side ActiveSide { get; set; } = Side.Left;
     public Side StartingSide { get; set; } = Side.Left;
@@ -59,6 +122,31 @@ public sealed class GameState
 
     /// <summary>前线归属。NotAvailable = 无人控制。</summary>
     public Side FrontlineOwner { get; set; } = Side.NotAvailable;
+
+    /// <summary>
+    /// `stopFurtherActions` —— `BP_GameState_Battle` 的一个 **bool 成员**
+    /// （读写各一行：`_deps/BP_GameState_Battle.g.cs:3611` 写、`:2578` 读）。
+    ///
+    /// ## 谁写谁读（蓝图全量）
+    ///
+    /// 写：`SetStopFurtherActions(GameStateRef, bool)`。三个写入方：
+    /// <list type="bullet">
+    /// <item>`AfterWaitCardPlayFromHand` `:624` 开头的 `False`（**每次动作前复位**）；</item>
+    /// <item>`GotchaTriggered` `:23859` 的 `True` —— 「反制卡触发 ⇒ 后面的卡动作全部作废」；</item>
+    /// <item>`GotchaTriggered` `:23902` 的 `False`（见下方 ⚠️）。</item>
+    /// </list>
+    /// 读：`GetStopFurtherActions()`，只在卡牌打出链里当**提前退出**的门用
+    /// （`BP_CardFunctions.g.cs:684/5887/6316/14937/15673/16567`）。
+    ///
+    /// ## ⚠️ 内核只建模**状态**，没有建模**消费者**
+    ///
+    /// 所有读取点都在 `AfterWaitCardPlayFromHand` / `CardPlayedFromHand` /
+    /// `PlayCardFromHand` 这一族**库函数**里，而它们**不在 `card-ir.json` 的调用点集合里**
+    /// （IR 只含每张卡自己的事件体）。⇒ 本内核设置这个标志后**没有代码读它**，
+    /// 效果是惰性的。如实记录：**这是"状态已就位、消费方未接线"**，
+    /// 不是"已经实现了 stopFurtherActions 的语义"。
+    /// </summary>
+    public bool StopFurtherActions { get; set; }
 
     /// <summary>
     /// 前线**限制者**卡 ID 的集合（对应 `BP_GameState_Battle.FrontlineLimiters`
@@ -673,7 +761,15 @@ public sealed class GameState
         Kredits(Side.Right), MaxKredits(Side.Right),
         FrontlineOwner,
         IsFrontlineLimited,
-        AllCards.Select(c => c.Snapshot()).ToArray());
+        AllCards.Select(c => c.Snapshot()).ToArray())
+        {
+            LeftKreditSlotsLost = KreditSlotsLost(Side.Left),
+            RightKreditSlotsLost = KreditSlotsLost(Side.Right),
+            FrontlineLimiterIds = FrontlineLimiters.OrderBy(id => id).ToArray(),
+            // Preserve list order: future dispatch can depend on insertion order.
+            Restrictions = GameplayRestrictions.Select(x => new GameplayRestrictionSnapshot(
+                x.Side, x.Type, x.SourceCardId, x.TurnsRemaining)).ToArray(),
+        };
 
     public string SnapshotJson() => System.Text.Json.JsonSerializer.Serialize(
         Snapshot(), SnapshotJsonOptions);
@@ -714,7 +810,16 @@ public sealed record MatchSnapshot(
     int RightMaxKredits,
     Side FrontlineOwner,
     bool IsFrontlineLimited,
-    CardSnapshot[] Cards);
+    CardSnapshot[] Cards)
+{
+    public int LeftKreditSlotsLost { get; init; }
+    public int RightKreditSlotsLost { get; init; }
+    public int[] FrontlineLimiterIds { get; init; } = Array.Empty<int>();
+    public GameplayRestrictionSnapshot[] Restrictions { get; init; } = Array.Empty<GameplayRestrictionSnapshot>();
+}
+
+public sealed record GameplayRestrictionSnapshot(Side Side, GameplayRestrictionType Type,
+    int SourceCardId, int TurnsRemaining);
 
 /// <summary>一条已结算的动作 —— 与协议里的 action 信封对应。</summary>
 public sealed record GameAction(
