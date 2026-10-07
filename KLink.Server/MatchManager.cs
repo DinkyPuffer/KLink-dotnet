@@ -587,6 +587,10 @@ public sealed class MatchManager
         AddCards(cards, match.RightHandCards);
         AddCards(cards, match.LeftDeckCards);
         AddCards(cards, match.RightDeckCards);
+        // Mulligan 弃牌不会进入动作流；必须把它们以 Discard 位置覆盖
+        // 初始卡池中的同一张卡，否则 ReplayRunner 会把弃掉的起手牌再次当作牌库卡。
+        AddDiscardedCards(cards, match.LeftDiscardedCards, Side.Left);
+        AddDiscardedCards(cards, match.RightDiscardedCards, Side.Right);
 
         var actions = new List<ServerAction>();
         foreach (var idNode in match.Actions)
@@ -624,6 +628,30 @@ public sealed class MatchManager
             cards[id] = new ServerCard(id, c["is_gold"]?.GetValue<bool>() ?? false,
                 c["location"]?.GetValue<string>() ?? "", c["location_number"]?.GetValue<int>() ?? 0,
                 c["name"]?.GetValue<string>() ?? "");
+        }
+    }
+
+    private static void AddDiscardedCards(Dictionary<int, ServerCard> cards, JsonArray array, Side side)
+    {
+        string location = side == Side.Left ? "discard_left" : "discard_right";
+        foreach (var node in array)
+        {
+            if (node is not JsonObject card)
+            {
+                continue;
+            }
+
+            int id = card["card_id"]?.GetValue<int>() ?? 0;
+            if (id <= 0)
+            {
+                continue;
+            }
+
+            cards[id] = new ServerCard(id,
+                card["is_gold"]?.GetValue<bool>() ?? false,
+                location,
+                card["location_number"]?.GetValue<int>() ?? 0,
+                card["name"]?.GetValue<string>() ?? "");
         }
     }
 
